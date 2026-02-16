@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QUIZ STRAŻACKI – OSP Łazy</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0b1220">
+</head>
+<body>
+
+  <!-- ADMIN -->
+  <div class="gear" id="adminGear" title="Panel admina">⚙</div>
+  <div class="devIcon" id="devGear" title="Panel dewelopera">🛠</div>
+  <div id="adminCloseEdge">✖</div>
+
+  <div class="page">
+    <div class="card" id="mainCard">
+      <div class="cardGlow glowOk" id="glowOk"></div>
+      <div class="cardGlow glowBad" id="glowBad"></div>
+
+      <div class="cardInner">
+        <div class="topBrand">
+          <img class="logo" id="unitLogo" src="logo.png" alt="Logo OSP" />
+          <h1 class="title">QUIZ STRAŻACKI</h1>
+          <h2 class="subtitle" id="unitSubtitle">Ochotnicza Straż Pożarna w Łazach</h2>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- START -->
+        <div id="startScreen">
+          <div class="startActions">
+
+            <label class="toggleRow">
+              <input type="checkbox" id="trainingToggle" />
+              <span>Tryb szkoleniowy (po każdej odpowiedzi pokazuje poprawną i czeka na „Dalej”)</span>
+            </label>
+
+</div>
+
+          <div class="fieldLabel">Twój Kryptonim (Imię):</div>
+          <input class="input" type="text" id="playerName" placeholder="Wpisz imię..." />
+          <button class="btn btnPrimary" id="startBtn">🚒 START</button>
+
+          <div class="divider"></div>
+
+          <div class="rankHeader">🏆 TOP 3 – Podium</div>
+          <div class="podiumWrap" id="podiumStart"></div>
+
+          <div class="divider"></div>
+
+          <div class="rankHeader">🏆 Ranking (lokalnie na tym urządzeniu)</div>
+          <div class="rankList" id="rankingList"></div>
+          <div id="historyView"></div>
+        </div>
+
+        <!-- QUIZ -->
+        <div id="quizScreen" style="display:none;">
+          <div class="hud">
+            <div class="pill">Pytanie <strong id="qIndex">1</strong> / <strong id="qTotal">40</strong></div>
+            <div class="pill" id="timePill">Czas: <strong id="timer">20</strong>s</div>
+            <div class="pill">Kategoria: <strong id="category">—</strong></div>
+
+            <div class="pill pillCombo">
+              <span class="comboFire">🔥</span> COMBO <strong id="comboValue">x0</strong>
+            </div>
+            <div class="pill pillCombo" title="Bonus za serię">
+              ✨ Bonus <strong id="bonusValue">+0</strong>
+            </div>
+
+            <button class="btn btnGhost btnInline" id="endBtn" title="Zakończ quiz">⛔ Zakończ</button>
+          </div>
+
+          <div class="progressWrap"><div class="progress" id="progress"></div></div>
+
+          <div class="questionArea" id="questionArea">
+            <div class="comboPop" id="comboPop">🔥 COMBO!</div>
+
+            <!-- IMAGE -->
+            <div class="qImgWrap" id="qImgWrap" style="display:none;">
+              <img id="qImg" class="qImg" alt="Obrazek do pytania" />
+            </div>
+
+            <div class="question" id="question"></div>
+            <div class="answers" id="answers"></div>
+          </div>
+        
+          <!-- TRAINING MODE PANEL -->
+          <div id="trainingPanel" class="trainingPanel" style="display:none;">
+            <div class="trainingCard">
+              <div id="trainingTitle" class="trainingTitle">Tryb szkoleniowy</div>
+              <div id="trainingBody" class="trainingBody"></div>
+              <button class="btn btnPrimary" id="trainingNextBtn">Dalej ▶</button>
+            </div>
+          </div>
+
+</div>
+
+        <!-- RESULT -->
+        <div id="resultScreen" style="display:none;">
+          <div class="resultTop">
+            <button class="btn btnPrimary" id="nextPlayerBtn">➡ Następny gracz</button>
+          </div>
+
+          <!-- End animation area -->
+          <div class="resultHero">
+            <canvas id="confettiCanvas"></canvas>
+            <div class="resultBadge" id="rankBadge">RANGA</div>
+            <div class="resultScoreLine" id="finalResult"></div>
+            <div class="resultCountUp">
+              <div class="countBox">
+                <div class="countLabel">Poprawne</div>
+                <div class="countValue" id="countCorrect">0</div>
+              </div>
+              <div class="countBox">
+                <div class="countLabel">Bonus</div>
+                <div class="countValue" id="countBonus">0</div>
+              </div>
+              <div class="countBox">
+                <div class="countLabel">Suma pkt</div>
+                <div class="countValue" id="countTotal">0</div>
+              </div>
+              <div class="countBox">
+                <div class="countLabel">Wynik</div>
+                <div class="countValue" id="countPercent">0%</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="reviewBox" id="review"></div>
+
+          <div class="divider"></div>
+          <div class="rankHeader">🏆 TOP 3 – Podium</div>
+          <div class="podiumWrap" id="podiumResult"></div>
+
+          <div class="divider"></div>
+          <div class="rankHeader">🏆 Ranking (lokalnie na tym urządzeniu)</div>
+          <div class="rankList" id="rankingList2"></div>
+          <div id="historyView2"></div>
+        </div>
+
+        <div class="footer">autorstwo: druh. Rafał Kukla</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ADMIN PANEL -->
+  <div id="adminPanel">
+    <div class="adminTitle">Panel Admina</div>
+
+    <div id="loginSection" class="adminBox">
+      <div class="muted" style="margin-bottom:8px;">Zaloguj się, aby edytować pytania i ranking.</div>
+      <input class="input" type="password" id="adminPassword" placeholder="Hasło" />
+      <button class="btn btnPrimary" id="adminLoginBtn">Zaloguj</button>
+      <div class="muted" style="margin-top:8px;">Enter zatwierdza logowanie.</div>
+    </div>
+
+    <div id="adminContent" style="display:none;">
+      <div class="adminBox">
+        <button class="btn btnGhost" id="resetBankBtn">🔄 Przywróć bank pytań (40)</button>
+        <button class="btn btnGhost" id="clearRankBtn">🗑 Resetuj ranking</button>
+        <button class="btn btnGhost" id="clearHistoryBtn">🧹 Wyczyść podgląd wyników</button>
+      </div>
+
+      <div class="adminBox">
+        <div class="adminTitle" style="margin:0 0 8px;">Lista pytań</div>
+        <div class="muted" id="bankCount"></div>
+        <div id="questionsList"></div>
+      </div>
+
+      <div class="adminBox">
+        <div class="adminTitle" style="margin:0 0 8px;">Dodaj / Edytuj pytanie</div>
+        <input class="input" id="qCat" placeholder="Kategoria (np. Pierwsza pomoc)" />
+        <input class="input" id="newQ" placeholder="Treść pytania" />
+        <input class="input" id="a1" placeholder="Odpowiedź A" />
+        <input class="input" id="a2" placeholder="Odpowiedź B" />
+        <input class="input" id="a3" placeholder="Odpowiedź C" />
+
+        <div class="row2">
+          <select class="input" id="correct">
+            <option value="0">Poprawna A</option>
+            <option value="1">Poprawna B</option>
+            <option value="2">Poprawna C</option>
+          </select>
+
+          <div class="fileRow">
+            <div class="muted fileLabel">Obrazek do pytania (miniaturka, opcjonalnie)</div>
+            <input class="input" type="file" id="qImgFile" accept="image/*" />
+            <img id="qImgPreview" class="qImgPreview" alt="Podgląd miniaturki" style="display:none;" />
+            <div class="muted" style="margin-top:6px;">Jeśli nie dodasz obrazka, quiz pokaże domyślną ikonkę na podstawie kategorii.</div>
+          </div>
+        </div>
+
+        <button class="btn btnPrimary" id="saveQBtn">💾 Zapisz</button>
+        <button class="btn btnGhost" id="cancelEditBtn">↩ Anuluj edycję</button>
+      </div>
+    </div>
+  </div>
+<!-- PANEL DEWELOPERA -->
+<div id="devPanel">
+  <div class="adminTitle">Panel dewelopera</div>
+  <div id="devCloseEdge">✖</div>
+
+  <div id="devLoginSection" class="adminBox">
+    <input class="input" type="password" id="devPassword" placeholder="Hasło" />
+    <button class="btn btnPrimary" id="devLoginBtn">Zaloguj</button>
+    <div class="muted" style="margin-top:8px;">Enter zatwierdza logowanie.</div>
+  </div>
+
+  <div id="devContent" style="display:none;">
+    <div class="adminBox">
+      <input class="input" id="devSubtitle" placeholder="Nowa nazwa jednostki" />
+
+      <div class="fileRow">
+        <div class="muted fileLabel">Zmiana logo jednostki (plik)</div>
+        <input class="input" type="file" id="devLogo" accept="image/*" />
+      </div>
+
+      <div class="fileRow">
+        <div class="muted fileLabel">Zmiana tła strony (plik)</div>
+        <input class="input" type="file" id="devBg" accept="image/*" />
+      </div>
+      <div class="muted">Rozmycie tła</div>
+      <input class="input" type="range" min="0" max="20" id="devBlur" />
+      <button class="btn btnPrimary" id="devSaveBtn">💾 Zapisz</button>
+      <button class="btn btnGhost" id="devResetBtn">🔄 Reset</button>
+    </div>
+  </div>
+</div>
+
+  <script src="app.js"></script>
+
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./service-worker.js").catch(() => {});
+    });
+  }
+</script>
+
+</body>
+</html>
