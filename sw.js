@@ -1,5 +1,5 @@
 // Simple offline cache for GitHub Pages / Firebase Hosting
-const CACHE = "fabric-tracker-v13";
+const CACHE = "fabric-tracker-v14-done";
 const ASSETS = [
   "./",
   "./index.html",

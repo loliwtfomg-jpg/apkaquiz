@@ -1,7 +1,7 @@
-// Tracker tkanin – Slow Motion (v11)
+// Tracker tkanin – Slow Motion (v13-todo)
 // Offline-first: zapis w localStorage. Gotowe pod GitHub Pages / Firebase Hosting.
 
-const LS_KEY = "fabric_tracker_state_v1";
+const LS_KEY = "fabric_tracker_state_v14_done";
 const LEGACY_KEYS = ["df_slow_tracker_state_v3","df_slow_tracker_state_v2","df_slow_tracker_state_v1"];
 const SEED_DATA = JSON.parse(document.getElementById("seed-data").textContent);
 
