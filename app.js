@@ -1,1434 +1,1418 @@
-/* =========================================
-   QUIZ STRAŻACKI – ULTRA PRO (app.js)
-   - 40 pytań + obrazki (img)
-   - timer + zakończ
-   - combo + bonus
-   - ranking + podium + podgląd odpowiedzi
-   - panel admina (bank pytań / reset)
-   - panel dewelopera (3 klik w logo) – tylko wizualne ustawienia
-========================================= */
+// Tracker tkanin – Slow Motion (v11)
+// Offline-first: zapis w localStorage. Gotowe pod GitHub Pages / Firebase Hosting.
 
-(() => {
-  "use strict";
+const LS_KEY = "fabric_tracker_state_v1";
+const LEGACY_KEYS = ["df_slow_tracker_state_v3","df_slow_tracker_state_v2","df_slow_tracker_state_v1"];
+const SEED_DATA = JSON.parse(document.getElementById("seed-data").textContent);
 
-  const BANK_KEY = "osp_quiz_bank_ultra_v2_balanced";
-  const RANK_KEY = "osp_quiz_rank_ultra_v1";
-  const DEV_KEY  = "osp_quiz_dev_ultra_v1";
-  // Polyfill dla structuredClone (starsze przeglądarki / WebView)
-  if (typeof window.structuredClone !== "function"){
-    window.structuredClone = (obj)=> JSON.parse(JSON.stringify(obj));
-  }
+const STATUS = {
+  TODO: "Do nagrania",
+  FIX: "Do poprawy",
+  DONE: "Zrobione",
+};
+const STATUS_LIST = [STATUS.TODO, STATUS.FIX, STATUS.DONE];
 
-  /* =========================
-     DOM
-  ========================= */
-  const $ = (id) => document.getElementById(id);
+const $ = (sel, root=document) => root.querySelector(sel);
+const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 
-  // Music (removed)
-  const music = null;
+let state = null;
+let collapsedGroups = new Set();   // UI only (nie zapisujemy)
+let selectedFid = null;            // UI only (nie zapisujemy)
+let lastGroups = [];               // UI only
 
-  // Admin
-  const adminGear = $("adminGear");
-  const adminCloseEdge = $("adminCloseEdge");
-  const adminPanel = $("adminPanel");
-  const adminPassword = $("adminPassword");
-  const adminLoginBtn = $("adminLoginBtn");
-  const loginSection = $("loginSection");
-  const adminContent = $("adminContent");
+// Tryb masowych operacji (UI only)
+let bulkMode = false;
+let selectedFabrics = new Set();            // fid
+let selectedColors = new Map();             // fid -> Set(color)
 
-  const resetBankBtn = $("resetBankBtn");
-  const clearRankBtn = $("clearRankBtn");
-  const clearHistoryBtn = $("clearHistoryBtn");
+// Historia zmian (undo) – trzymamy w RAM (nie zapisujemy do localStorage)
+const HISTORY_MAX = 10;
+let historyStack = [];   // {label, undoFn}
+let isUndoing = false;
 
-  const questionsList = $("questionsList");
-  const bankCount = $("bankCount");
-  const qCat = $("qCat");
-  const newQ = $("newQ");
-  const a1 = $("a1");
-  const a2 = $("a2");
-  const a3 = $("a3");
-  const correctSel = $("correct");
-  const qImgFile = $("qImgFile");
-  const qImgPreview = $("qImgPreview");
-  let editImgData = null;
-  const saveQBtn = $("saveQBtn");
-  const cancelEditBtn = $("cancelEditBtn");
+function pushUndo(label, undoFn){
+  if(isUndoing) return;
+  historyStack.push({label: label || "zmiana", undoFn});
+  if(historyStack.length > HISTORY_MAX) historyStack.shift();
+  updateUndoButton();
+}
 
-  // Screens
-  const startScreen = $("startScreen");
-  const quizScreen = $("quizScreen");
-  const resultScreen = $("resultScreen");
+function updateUndoButton(){
+  const btn = $("#btnUndo");
+  if(!btn) return;
+  btn.disabled = historyStack.length === 0;
+  const last = historyStack[historyStack.length - 1];
+  btn.title = historyStack.length ? `Cofnij: ${last.label} (Ctrl+Z)` : "Cofnij (Ctrl+Z)";
+}
 
-  // Game controls
-  const playerName = $("playerName");
-  const startBtn = $("startBtn");
-  const trainingToggle = $("trainingToggle");
-  const endBtn = $("endBtn");
-  const nextPlayerBtn = $("nextPlayerBtn");
+function undo(){
+  const entry = historyStack.pop();
+  if(!entry) return;
+  isUndoing = true;
+  try{ entry.undoFn?.(); }
+  finally{ isUndoing = false; }
+  saveState(true);
+  render();
+  updateUndoButton();
+  setSaveStatus("cofnięto");
+}
 
-  // Quiz UI
-  const qIndexEl = $("qIndex");
-  const qTotalEl = $("qTotal");
-  const timerEl = $("timer");
-  const timePill = $("timePill");
-  const categoryEl = $("category");
-  const progressEl = $("progress");
-  const questionArea = $("questionArea");
-  const questionEl = $("question");
-  const answersEl = $("answers");
 
-  // Training mode
-  const trainingPanel = $("trainingPanel");
-  const trainingTitle = $("trainingTitle");
-  const trainingBody = $("trainingBody");
-  const trainingNextBtn = $("trainingNextBtn");
+let deferredInstallPrompt = null;
 
-  const glowOk = $("glowOk");
-  const glowBad = $("glowBad");
+// ------------------------- Utils -------------------------
 
-  const qImgWrap = $("qImgWrap");
-  const qImg = $("qImg");
+function now(){ return Date.now(); }
 
-  const comboValueEl = $("comboValue");
-  const bonusValueEl = $("bonusValue");
-  const comboPop = $("comboPop");
+function setSaveStatus(t){
+  const el = $("#saveStatus");
+  if(el) el.textContent = t || "—";
+}
 
-  // Result UI
-  const finalResult = $("finalResult");
-  const rankBadge = $("rankBadge");
-  const review = $("review");
-  const countCorrect = $("countCorrect");
-  const countBonus = $("countBonus");
-  const countTotal = $("countTotal");
-  const countPercent = $("countPercent");
+function deepClone(obj){ return JSON.parse(JSON.stringify(obj)); }
 
-  // Ranking + podium + history view
-  const podiumStart = $("podiumStart");
-  const podiumResult = $("podiumResult");
-  const rankingList = $("rankingList");
-  const rankingList2 = $("rankingList2");
-  const historyView = $("historyView");
-  const historyView2 = $("historyView2");
+function slugify(s){
+  return String(s||"")
+    .trim()
+    .toLowerCase()
+    .replace(/ą/g,"a").replace(/ć/g,"c").replace(/ę/g,"e").replace(/ł/g,"l")
+    .replace(/ń/g,"n").replace(/ó/g,"o").replace(/ś/g,"s").replace(/ż/g,"z").replace(/ź/g,"z")
+    .replace(/[^a-z0-9]+/g,"-")
+    .replace(/^-+|-+$/g,"")
+    .slice(0,48) || ("tkanina-" + Math.random().toString(16).slice(2,8));
+}
 
-  // Confetti
-  const confettiCanvas = $("confettiCanvas");
-  const confCtx = confettiCanvas.getContext("2d");
+function uniq(arr){
+  return Array.from(new Set(arr));
+}
 
-  /* =========================
-     Helpers
-  ========================= */
-  function safeParse(s){ try{ return JSON.parse(s); } catch { return null; } }
-  function escapeHtml(str){
-    return String(str ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll("\"", "&quot;")
-      .replaceAll("'","&#039;");
-  }
-  function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
-  function shuffle(arr){
-    for (let i = arr.length - 1; i > 0; i--){
-      const j = Math.floor(Math.random() * (i + 1));
-      [arr[i], arr[j]] = [arr[j], arr[i]];
+function parseColorsInput(raw){
+  const s = String(raw||"").trim();
+  if(!s) return [];
+  const parts = s.split(/[\s,;]+/).filter(Boolean);
+  const out = [];
+  for(const p of parts){
+    const m = /^(\d+)\s*-\s*(\d+)$/.exec(p);
+    if(m){
+      let a = parseInt(m[1],10), b = parseInt(m[2],10);
+      if(Number.isNaN(a) || Number.isNaN(b)) continue;
+      if(a>b) [a,b]=[b,a];
+      for(let i=a; i<=b; i++) out.push(String(i));
+    }else{
+      const n = p.replace(/[^\d]/g,"");
+      if(n) out.push(String(parseInt(n,10)));
     }
-    return arr;
   }
+  return uniq(out.filter(Boolean));
+}
 
+function compareColor(a,b){
+  const na = parseInt(a,10);
+  const nb = parseInt(b,10);
+  if(Number.isFinite(na) && Number.isFinite(nb)) return na-nb;
+  return String(a).localeCompare(String(b), "pl");
+}
 
-  
-  /* =========================
-     Balance correct answers (A/B/C)
-  ========================= */
-  function rotateLeft3(arr, k){
-    const n = 3;
-    const kk = ((k % n) + n) % n;
-    if (kk === 0) return arr.slice();
-    return arr.slice(kk).concat(arr.slice(0, kk));
-  }
+function groupRank(g){
+  // kolejność kolekcji = kolejność w state.groups (nie alfabetycznie)
+  const arr = (state?.groups || []);
+  const i = arr.indexOf(g);
+  return i >= 0 ? i : 9999;
+}
 
-  // Ensures distribution: A=13, B=13, C=14 for 40 questions (or proportional for other sizes)
-  function rebalanceCorrectLetters(bank){
-    if (!Array.isArray(bank) || bank.length === 0) return bank;
+function downloadFile(filename, content, mime){
+  const blob = new Blob([content], {type: mime || "application/octet-stream"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
-    const total = bank.length;
-    // target counts: split as evenly as possible, with the remainder going to C then A then B
-    const base = Math.floor(total / 3);
-    let rem = total - base*3;
-    let targetA = base, targetB = base, targetC = base;
-    if (rem > 0){ targetC++; rem--; }
-    if (rem > 0){ targetA++; rem--; }
-    if (rem > 0){ targetB++; rem--; }
+// ------------------------- State & migrations -------------------------
 
-    // desired index sequence (spread evenly): [C,A,B] repeating
-    const desired = [];
-    while (desired.length < total) desired.push(2,0,1);
-    desired.length = total;
-
-    // If total isn't 40, adjust tail to meet targets
-    const counts = [0,0,0];
-    for (let i=0;i<desired.length;i++){
-      counts[desired[i]]++;
-    }
-    // Fix counts to match targets by swapping from overs to unders
-    const target = [targetA, targetB, targetC];
-    for (let i=0;i<desired.length;i++){
-      for (let from=0; from<3; from++){
-        for (let to=0; to<3; to++){
-          if (counts[from] > target[from] && counts[to] < target[to] && desired[i] === from){
-            desired[i] = to;
-            counts[from]--; counts[to]++;
-          }
-        }
-      }
-    }
-
-    // Apply per-question rotation so correct answer CONTENT stays the same, only its letter changes.
-    for (let i=0;i<bank.length;i++){
-      const q = bank[i];
-      if (!q || !Array.isArray(q.a) || q.a.length !== 3) continue;
-      if (![0,1,2].includes(q.c)) continue;
-
-      const want = desired[i];
-      const cur  = q.c;
-      const k = (cur - want + 3) % 3; // rotate left by k
-      if (k !== 0){
-        q.a = rotateLeft3(q.a, k);
-        q.c = want;
-      }
-    }
-    return bank;
-  }
-
-/* =========================
-     Mini-ikonki do pytań (offline)
-     - Jeśli pytanie ma imgData (dodane w panelu admina), używamy go.
-     - Jeśli nie, pokazujemy domyślną ikonkę na podstawie kategorii.
-  ========================= */
-  const ICONS = {
-    default: 'data:image/svg+xml;utf8,' + encodeURIComponent(`
-      <svg xmlns="http://www.w3.org/2000/svg" width="360" height="220" viewBox="0 0 360 220">
-        <defs>
-          <linearGradient id="g" x1="0" x2="1">
-            <stop offset="0" stop-color="#b71c1c"/>
-            <stop offset="1" stop-color="#e53935"/>
-          </linearGradient>
-        </defs>
-        <rect width="360" height="220" rx="22" fill="url(#g)"/>
-        <circle cx="82" cy="110" r="48" fill="rgba(255,255,255,0.22)"/>
-        <path d="M92 76c-18 10-28 28-28 48 0 24 16 44 38 50-4-8-6-16-6-24 0-16 8-30 18-40 10 10 18 24 18 40 0 8-2 16-6 24 22-6 38-26 38-50 0-20-10-38-28-48-6 10-14 18-22 24-8-6-16-14-22-24z" fill="#fff"/>
-        <text x="180" y="132" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="28" font-weight="700" fill="rgba(255,255,255,0.92)">OSP</text>
-      </svg>`),
-
-    kpp: 'data:image/svg+xml;utf8,' + encodeURIComponent(`
-      <svg xmlns="http://www.w3.org/2000/svg" width="360" height="220" viewBox="0 0 360 220">
-        <rect width="360" height="220" rx="22" fill="#0d47a1"/>
-        <rect x="40" y="50" width="280" height="120" rx="18" fill="rgba(255,255,255,0.18)"/>
-        <path d="M180 76v68M146 110h68" stroke="#fff" stroke-width="18" stroke-linecap="round"/>
-        <text x="180" y="196" text-anchor="middle" font-family="Arial" font-size="18" fill="rgba(255,255,255,0.9)">Pierwsza pomoc</text>
-      </svg>`),
-
-    sprzet: 'data:image/svg+xml;utf8,' + encodeURIComponent(`
-      <svg xmlns="http://www.w3.org/2000/svg" width="360" height="220" viewBox="0 0 360 220">
-        <rect width="360" height="220" rx="22" fill="#263238"/>
-        <path d="M78 150c38-66 74-78 116-36 34-38 70-26 94 36" fill="none" stroke="#fff" stroke-width="16" stroke-linecap="round"/>
-        <path d="M120 150h120" stroke="#fff" stroke-width="16" stroke-linecap="round"/>
-        <text x="180" y="196" text-anchor="middle" font-family="Arial" font-size="18" fill="rgba(255,255,255,0.9)">Sprzęt</text>
-      </svg>`),
-
-    organizacja: 'data:image/svg+xml;utf8,' + encodeURIComponent(`
-      <svg xmlns="http://www.w3.org/2000/svg" width="360" height="220" viewBox="0 0 360 220">
-        <rect width="360" height="220" rx="22" fill="#1b5e20"/>
-        <path d="M120 150v-52l60-34 60 34v52" fill="none" stroke="#fff" stroke-width="12" stroke-linejoin="round"/>
-        <path d="M150 150v-34h60v34" fill="none" stroke="#fff" stroke-width="12" stroke-linejoin="round"/>
-        <text x="180" y="196" text-anchor="middle" font-family="Arial" font-size="18" fill="rgba(255,255,255,0.9)">Organizacja</text>
-      </svg>`),
+function emptyState(){
+  return {
+    version: 3,
+    updatedAt: now(),
+    groups: [],
+    fabrics: {},   // id -> {id,name,group,createdAt}
+    colors: {},    // fabricId -> { "1": "Zrobione", ... }
+    prefs: {},
   };
+}
 
-  function getCategoryIcon(cat){
-    const c = String(cat || "").toLowerCase();
-    if (/(kpp|pierwsz|ratownictwo med|resuscyt|opatr)/.test(c)) return ICONS.kpp;
-    if (/(sprz|wąż|hydrant|gaśnic|armatur|pompa|drab)/.test(c)) return ICONS.sprzet;
-    if (/(organiz|stopni|ustaw|przepisy|zastęp|dowód)/.test(c)) return ICONS.organizacja;
-    return ICONS.default;
-  }
-
-  function getQuestionImage(q){
-    if (q && q.imgData) return q.imgData; // wgrany w adminie (Base64)
-    if (q && typeof q.img === "string" && q.img.trim()) return q.img.trim(); // ścieżka do pliku (np. images/q01.png)
-    return getCategoryIcon(q?.cat);
-  }
-
-  /* =========================
-     Default bank (40)
-     img: images/q01.png ... images/q40.png (możesz podmienić w adminie)
-  ========================= */
-  const defaultBank40 = [
-    {cat:"Pożary", q:"Najczęstszą przyczyną pożarów w budynkach mieszkalnych jest:", a:["wyładowanie atmosferyczne","nieostrożność osób dorosłych przy posługiwaniu się ogniem","podpalenie"], c:1, img:"images/q01.png"},
-    {cat:"Sprzęt", q:"Gaśnica proszkowa oznaczona symbolem ABC służy do gaszenia:", a:["tylko ciał stałych","tylko cieczy","ciał stałych, cieczy i gazów"], c:2, img:"images/q02.png"},
-    {cat:"Organizacja", q:"Numer alarmowy do straży pożarnej to:", a:["997","998","999"], c:1, img:"images/q03.png"},
-    {cat:"Sprzęt", q:"Hydrant wewnętrzny znajduje się:", a:["na ulicy","w budynku","tylko w remizie"], c:1, img:"images/q04.png"},
-    {cat:"ODO", q:"Aparat ODO służy do:", a:["ochrony słuchu","ochrony dróg oddechowych","pomiaru temperatury"], c:1, img:"images/q05.png"},
-    {cat:"Taktyka", q:"Pierwszą czynnością po przybyciu na miejsce zdarzenia jest:", a:["rozwinięcie linii gaśniczej","rozpoznanie sytuacji","podanie wody"], c:1, img:"images/q06.png"},
-    {cat:"Taktyka", q:"Minimalna liczba strażaków do roty to:", a:["1","2","3"], c:1, img:"images/q07.png"},
-    {cat:"Taktyka", q:"Prąd rozproszony stosuje się głównie do:", a:["gaszenia instalacji elektrycznych","chłodzenia gazów pożarowych","podawania piany"], c:1, img:"images/q08.png"},
-    {cat:"KPP", q:"RKO u dorosłych to:", a:["15:2","30:2","5:1"], c:1, img:"images/q09.png"},
-    {cat:"Zagrożenia", q:"Tlenek węgla to gaz:", a:["bezbarwny i bezwonny","żółty","o silnym zapachu"], c:0, img:"images/q10.png"},
-    {cat:"Prawo", q:"OSP działa na podstawie:", a:["Kodeksu cywilnego","Ustawy o ochronie przeciwpożarowej","Karty Nauczyciela"], c:1, img:"images/q11.png"},
-    {cat:"BHP", q:"Hełm strażacki chroni przed:", a:["hałasem","urazami mechanicznymi i temperaturą","promieniowaniem UV"], c:1, img:"images/q12.png"},
-    {cat:"Taktyka", q:"Pianę ciężką stosuje się do:", a:["gaszenia metali","gaszenia cieczy palnych","chłodzenia ścian"], c:1, img:"images/q13.png"},
-    {cat:"Sprzęt", q:"Gaśnica śniegowa zawiera:", a:["wodę","CO₂","azot"], c:1, img:"images/q14.png"},
-    {cat:"Dowodzenie", q:"Dowódcą akcji ratowniczej jest:", a:["najstarszy strażak","pierwszy przybyły kierowca","wyznaczony strażak z odpowiednimi kwalifikacjami"], c:2, img:"images/q15.png"},
-    {cat:"Elektryka", q:"Prądu wody nie wolno podawać na:", a:["drewno","instalację pod napięciem","ścianę"], c:1, img:"images/q16.png"},
-    {cat:"KPP", q:"AED służy do:", a:["podawania tlenu","defibrylacji","mierzenia ciśnienia"], c:1, img:"images/q17.png"},
-    {cat:"Sprzęt", q:"Drabina nasadkowa składa się z:", a:["1 przęsła","2 przęseł","3 przęseł"], c:2, img:"images/q18.png"},
-    {cat:"Organizacja", q:"Syrena alarmowa w OSP oznacza:", a:["zbiórkę","koniec akcji","ćwiczenia"], c:0, img:"images/q19.png"},
-    {cat:"Taktyka", q:"Teren akcji należy:", a:["pozostawić bez zabezpieczenia","zabezpieczyć i oznakować","opuścić po ugaszeniu"], c:1, img:"images/q20.png"},
-
-    {cat:"Organizacja", q:"Paliwo w samochodzie pożarniczym sprawdza:", a:["dowódca","kierowca","każdy strażak"], c:1, img:"images/q21.png"},
-    {cat:"Sprzęt", q:"Rękaw W-52 ma średnicę:", a:["52 mm","75 mm","25 mm"], c:0, img:"images/q22.png"},
-    {cat:"Zagrożenia", q:"Największe zagrożenie w pożarze to:", a:["ogień","dym","hałas"], c:1, img:"images/q23.png"},
-    {cat:"Organizacja", q:"Czas dojazdu w KSRG w obszarze miejskim to ok.:", a:["20 min","15 min","5 min"], c:1, img:"images/q24.png"},
-    {cat:"Chemia", q:"Sorbent służy do:", a:["gaszenia","pochłaniania cieczy","chłodzenia"], c:1, img:"images/q25.png"},
-    {cat:"Sprzęt", q:"Linia główna zasilająca to zwykle:", a:["W-25","W-52","W-75"], c:2, img:"images/q26.png"},
-    {cat:"Zagrożenia", q:"Zatrucie CO objawia się często:", a:["kaszlem","bólem głowy","wysypką"], c:1, img:"images/q27.png"},
-    {cat:"Sprzęt", q:"Gaśnica wodna NIE służy do:", a:["papieru","drewna","oleju"], c:2, img:"images/q28.png"},
-    {cat:"Łączność", q:"Łączność radiowa powinna być:", a:["krótka i rzeczowa","długa","prywatna"], c:0, img:"images/q29.png"},
-    {cat:"Organizacja", q:"Zastęp to minimum:", a:["3 osoby","6 osób","2 osoby"], c:1, img:"images/q30.png"},
-
-    {cat:"Sprzęt", q:"Hydrant zewnętrzny ma najczęściej kolor:", a:["czerwony","zielony","czarny"], c:0, img:"images/q31.png"},
-    {cat:"Sprzęt", q:"Motopompa służy do:", a:["tłoczenia wody","piany","powietrza"], c:0, img:"images/q32.png"},
-    {cat:"Taktyka", q:"Prąd zwarty ma zasięg większy niż prąd:", a:["mgłowy","pianowy","rozproszony"], c:2, img:"images/q33.png"},
-    {cat:"Sprzęt", q:"Rękaw W-75 stosuje się głównie do:", a:["natarcia","zasilania","odwadniania"], c:1, img:"images/q34.png"},
-    {cat:"Sprzęt", q:"Koc gaśniczy służy do:", a:["gaszenia małych pożarów","chłodzenia","izolacji akustycznej"], c:0, img:"images/q35.png"},
-    {cat:"ODO", q:"Butla ODO zawiera:", a:["tlen","sprężone powietrze","azot"], c:1, img:"images/q36.png"},
-    {cat:"Taktyka", q:"Rozpoznanie obejmuje przede wszystkim:", a:["liczbę poszkodowanych","markę auta","kolor budynku"], c:0, img:"images/q37.png"},
-    {cat:"Pożary", q:"Pożar klasy B dotyczy:", a:["gazów","cieczy","metali"], c:1, img:"images/q38.png"},
-    {cat:"Taktyka", q:"Piana izoluje poprzez:", a:["chłodzenie","odcięcie tlenu","rozcieńczenie"], c:1, img:"images/q39.png"},
-    {cat:"Wypadki", q:"Wypadek drogowy wymaga w pierwszej kolejności:", a:["zabezpieczenia miejsca","tylko gaszenia","wywiadu medialnego"], c:0, img:"images/q40.png"},
-  ];
-  /* =========================
-     Bank load/save
-  ========================= */
-  let questionBank = safeParse(localStorage.getItem(BANK_KEY));
-  if (!Array.isArray(questionBank) || questionBank.length === 0){
-    questionBank = structuredClone(defaultBank40);
-    localStorage.setItem(BANK_KEY, JSON.stringify(questionBank));
-  }
-  // Rebalance correct answers so they are not mostly 'B' (A/B/C ~ 1/3 each)
-  questionBank = rebalanceCorrectLetters(questionBank);
-  localStorage.setItem(BANK_KEY, JSON.stringify(questionBank));
-
-  function persistBank(){ localStorage.setItem(BANK_KEY, JSON.stringify(questionBank)); }
-
-  /* =========================
-     AUDIO: SFX + Alarm siren
-  ========================= */
-  let audioCtx = null;
-  function getCtx(){
-    if (!audioCtx){
-      const AC = window.AudioContext || window.webkitAudioContext;
-      audioCtx = new AC();
-    }
-    if (audioCtx.state === "suspended") audioCtx.resume().catch(()=>{});
-    return audioCtx;
-  }
-
-  function beep(freq=440, dur=0.06, gain=0.04, type="sine"){
-    const ctx = getCtx();
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.type = type;
-    o.frequency.value = freq;
-    g.gain.value = gain;
-    o.connect(g); g.connect(ctx.destination);
-    o.start();
-    o.stop(ctx.currentTime + dur);
-  }
-
-  function sfxCorrect(){ beep(740, 0.05, 0.06, "triangle"); beep(980, 0.06, 0.05, "triangle"); }
-  function sfxWrong(){ beep(220, 0.08, 0.06, "sawtooth"); }
-  function sfxCombo(){ beep(880, 0.05, 0.05, "square"); beep(1040, 0.06, 0.05, "square"); }
-  function sfxSirenShort(){
-    const ctx = getCtx();
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.type = "sawtooth";
-    g.gain.value = 0.03;
-    o.connect(g); g.connect(ctx.destination);
-    const t = ctx.currentTime;
-    o.frequency.setValueAtTime(520, t);
-    o.frequency.linearRampToValueAtTime(980, t + 0.35);
-    o.frequency.linearRampToValueAtTime(520, t + 0.7);
-    o.start(t);
-    o.stop(t + 0.72);
-  }
-
-  // Alarm mode oscillator
-  let alarmOsc = null;
-  let alarmGain = null;
-  let alarmFlashEl = null;
-
-  function startAlarmSiren(){
-    const ctx = getCtx();
-    stopAlarmSiren();
-
-    alarmOsc = ctx.createOscillator();
-    alarmGain = ctx.createGain();
-    alarmOsc.type = "sawtooth";
-    alarmGain.gain.value = 0.02;
-    alarmOsc.connect(alarmGain);
-    alarmGain.connect(ctx.destination);
-
-    const t = ctx.currentTime;
-    alarmOsc.frequency.setValueAtTime(520, t);
-
-    // LFO-ish ramp loop (manual)
-    let run = true;
-    const step = () => {
-      if (!run || !alarmOsc) return;
-      const now = ctx.currentTime;
-      alarmOsc.frequency.cancelScheduledValues(now);
-      alarmOsc.frequency.setValueAtTime(520, now);
-      alarmOsc.frequency.linearRampToValueAtTime(980, now + 0.4);
-      alarmOsc.frequency.linearRampToValueAtTime(520, now + 0.8);
-      setTimeout(step, 800);
+function stateFromSeed(seed){
+  const st = emptyState();
+  st.groups = uniq([...(seed.groups||[])].filter(Boolean));
+  for(const f of (seed.fabrics||[])){
+    st.fabrics[f.id] = {
+      id: f.id,
+      name: f.name,
+      group: f.group || st.groups[0] || "Kolekcja",
+      createdAt: f.createdAt || now(),
     };
-
-    alarmOsc.start();
-    step();
-
-    // Flash overlay
-    if (!alarmFlashEl){
-      alarmFlashEl = document.createElement("div");
-      alarmFlashEl.className = "alarmFlash";
-      document.body.appendChild(alarmFlashEl);
-    }
   }
-
-  function stopAlarmSiren(){
-    if (alarmOsc){
-      try{ alarmOsc.stop(); }catch{}
-      try{ alarmOsc.disconnect(); }catch{}
-      alarmOsc = null;
-    }
-    if (alarmGain){
-      try{ alarmGain.disconnect(); }catch{}
-      alarmGain = null;
-    }
-    if (alarmFlashEl){
-      alarmFlashEl.remove();
-      alarmFlashEl = null;
-    }
+  for(const s of (seed.shots||[])){
+    const fid = s.fabricId;
+    const c = String(s.color||"").trim();
+    if(!fid || !c) continue;
+    if(!st.colors[fid]) st.colors[fid] = {};
+    st.colors[fid][c] = STATUS_LIST.includes(s.status) ? s.status : STATUS.TODO;
   }
+  st.updatedAt = now();
+  return st;
+}
 
-  /* =========================
-     MUSIC widget (removed)
-  ========================= */
-
-  /* =========================
-     ADMIN panel
-  ========================= */
-  let adminLogged = false;
-  let editIndex = null;
-
-  function toggleAdmin(){
-    adminPanel.classList.toggle("active");
-    const active = adminPanel.classList.contains("active");
-    adminCloseEdge.style.display = active ? "block" : "none";
-    if (active && adminLogged) renderAdminList();
-
-    // Autofocus hasła po otwarciu (żeby od razu można pisać)
-    if (active && !adminLogged){
-      setTimeout(()=>{
-        try{
-          adminPassword.focus();
-          adminPassword.select?.();
-        }catch{}
-      }, 0);
-    }
+function migrateV1ToV3(old){
+  // v1/v2 miały "shots" z dodatkowymi polami (data/link/notatka)
+  const st = emptyState();
+  st.groups = uniq([...(old.groups||[]), ...(SEED_DATA.groups||[])].filter(Boolean));
+  // fabrics
+  const fabricsObj = old.fabrics || {};
+  for(const id of Object.keys(fabricsObj)){
+    const f = fabricsObj[id];
+    if(!f?.id) continue;
+    st.fabrics[f.id] = {
+      id: f.id,
+      name: f.name || f.id,
+      group: f.group || st.groups[0] || "Kolekcja",
+      createdAt: f.createdAt || now(),
+    };
   }
-
-  function loginAdmin(){
-    getCtx();
-    const pass = adminPassword.value;
-    if (pass === "osp1234"){
-      adminLogged = true;
-      loginSection.style.display = "none";
-      adminContent.style.display = "block";
-      renderAdminList();
-    } else {
-      alert("Nieprawidłowe hasło.");
-    }
-  }
-
-  adminGear.addEventListener("click", toggleAdmin);
-  adminCloseEdge.addEventListener("click", toggleAdmin);
-  adminLoginBtn.addEventListener("click", loginAdmin);
-  adminPassword.addEventListener("keydown", (e)=>{ if (e.key === "Enter") loginAdmin(); });
-
-  function fillFormFromQuestion(q){
-    qCat.value = q.cat ?? "";
-    newQ.value = q.q ?? "";
-    a1.value = q.a?.[0] ?? "";
-    a2.value = q.a?.[1] ?? "";
-    a3.value = q.a?.[2] ?? "";
-    correctSel.value = String(q.c ?? 0);
-    editImgData = q.imgData ?? null;
-    qImgFile.value = "";
-    if (editImgData){ qImgPreview.style.display="block"; qImgPreview.src = editImgData; }
-    else { qImgPreview.style.display="none"; qImgPreview.src=""; }
-  }
-
-  function clearForm(){
-    qCat.value = "";
-    newQ.value = "";
-    a1.value = "";
-    a2.value = "";
-    a3.value = "";
-    correctSel.value = "0";
-    editImgData = null;
-    qImgFile.value = "";
-    qImgPreview.style.display="none";
-    qImgPreview.src = "";
-  }
-
-
-  // Miniaturka pytania (offline) — wczytujemy plik i zapisujemy jako małe dataURL (żeby nie zapchać pamięci)
-  function readImageAsDataURL(file){
-    return new Promise((resolve, reject)=>{
-      const r = new FileReader();
-      r.onload = ()=> resolve(String(r.result || ""));
-      r.onerror = ()=> reject(new Error("Nie udało się wczytać pliku."));
-      r.readAsDataURL(file);
-    });
-  }
-
-  async function resizeToThumb(dataUrl, maxW=420, maxH=260, quality=0.80){
-    return new Promise((resolve)=>{
-      const img = new Image();
-      img.onload = ()=>{
-        const ratio = Math.min(maxW/img.width, maxH/img.height, 1);
-        const w = Math.max(1, Math.round(img.width*ratio));
-        const h = Math.max(1, Math.round(img.height*ratio));
-        const c = document.createElement("canvas");
-        c.width = w; c.height = h;
-        const ctx = c.getContext("2d");
-        ctx.drawImage(img, 0, 0, w, h);
-        // JPEG jest lżejszy niż PNG dla zdjęć
-        try{
-          resolve(c.toDataURL("image/jpeg", quality));
-        }catch(e){
-          resolve(dataUrl); // fallback
-        }
+  // if fabrics missing (rare), rebuild from shots
+  for(const sh of (old.shots||[])){
+    if(!st.fabrics[sh.fabricId]){
+      st.fabrics[sh.fabricId] = {
+        id: sh.fabricId,
+        name: sh.fabricName || sh.fabricId,
+        group: sh.group || st.groups[0] || "Kolekcja",
+        createdAt: sh.createdAt || now(),
       };
-      img.onerror = ()=> resolve(dataUrl);
-      img.src = dataUrl;
-    });
+    }
+  }
+  // colors
+  for(const sh of (old.shots||[])){
+    const fid = sh.fabricId;
+    const c = String(sh.color||"").trim();
+    if(!fid || !c) continue;
+    if(!st.colors[fid]) st.colors[fid] = {};
+    st.colors[fid][c] = STATUS_LIST.includes(sh.status) ? sh.status : STATUS.TODO;
+  }
+  st.updatedAt = now();
+  return st;
+}
+
+function mergeSeedIntoExisting(seed){
+  let changed = false;
+  if(!state) return false;
+
+  // groups: append missing, keep seed order
+  for(const g of (seed?.groups||[])){
+    if(!g) continue;
+    if(!state.groups.includes(g)){ state.groups.push(g); changed = true; }
   }
 
-  qImgFile.addEventListener("change", async ()=>{
-    const f = qImgFile.files && qImgFile.files[0];
-    if (!f){
-      // bez zmian
+  // fabrics: add missing
+  for(const f of (seed?.fabrics||[])){
+    if(!f?.id) continue;
+    if(!state.fabrics[f.id]){
+      state.fabrics[f.id] = {
+        id: f.id,
+        name: f.name || f.id,
+        group: f.group || state.groups[0] || "Kolekcja",
+        createdAt: f.createdAt || now(),
+      };
+      changed = true;
+    }
+  }
+
+  // colors from shots (do not overwrite existing statuses)
+  for(const s of (seed?.shots||[])){
+    const fid = s.fabricId;
+    const c = String(s.color||"").trim();
+    if(!fid || !c) continue;
+    ensureFabric(fid);
+    ensureColorMap(fid);
+    if(state.colors[fid][c] == null){
+      state.colors[fid][c] = STATUS_LIST.includes(s.status) ? s.status : STATUS.TODO;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function loadState(){
+  // najpierw próbujemy aktualny klucz, potem starsze (żeby nie zgubić danych)
+  let usedKey = LS_KEY;
+  let raw = localStorage.getItem(LS_KEY);
+  if(!raw){
+    for(const k of LEGACY_KEYS){
+      raw = localStorage.getItem(k);
+      if(raw){ usedKey = k; break; }
+    }
+  }
+  if(!raw){
+    state = stateFromSeed(SEED_DATA);
+    saveState(true);
+    return;
+  }
+  try{
+    const parsed = JSON.parse(raw);
+    if(parsed?.version === 3 && parsed.fabrics && parsed.colors){
+      state = parsed;
+      if(usedKey !== LS_KEY) setSaveStatus("wczytano dane ze starszej wersji");
+      if(!state.groups) state.groups = [];
+      if(!state.fabrics) state.fabrics = {};
+      if(!state.colors) state.colors = {};
+      if(!state.prefs) state.prefs = {};
+      if(!state.media) state.media = {};
+      const merged = mergeSeedIntoExisting(SEED_DATA);
+      if(merged){ saveState(true); setSaveStatus("uzupełniono listę"); }
       return;
     }
-    const raw = await readImageAsDataURL(f);
-    const thumb = await resizeToThumb(raw);
-    editImgData = thumb;
-    qImgPreview.style.display = "block";
-    qImgPreview.src = thumb;
-  });
-
-  function cancelEdit(){
-    editIndex = null;
-    cancelEditBtn.style.display = "none";
-    saveQBtn.textContent = "💾 Zapisz";
-    clearForm();
-  }
-
-  function renderAdminList(){
-    bankCount.innerHTML = `Liczba pytań w banku: <b>${questionBank.length}</b>`;
-    questionsList.innerHTML = "";
-
-    questionBank.forEach((q, idx)=>{
-      const row = document.createElement("div");
-      row.className = "adminRow";
-      row.innerHTML = `
-        <b>${idx+1}. ${escapeHtml(q.q)}</b>
-        <div class="muted">Kategoria: ${escapeHtml(q.cat || "—")} | Poprawna: ${String.fromCharCode(65 + (q.c ?? 0))}</div>
-        <div class="muted" style="margin-top:6px;">
-          A) ${escapeHtml(q.a?.[0] ?? "")}<br>
-          B) ${escapeHtml(q.a?.[1] ?? "")}<br>
-          C) ${escapeHtml(q.a?.[2] ?? "")}
-        </div>
-        <div class="muted" style="margin-top:6px;">Obrazek: ${escapeHtml(q.img || "—")}</div>
-        <div>
-          <button class="miniBtn" data-edit="${idx}">✏ Edytuj</button>
-          <button class="miniBtn danger" data-del="${idx}">🗑 Usuń</button>
-        </div>
-      `;
-      questionsList.appendChild(row);
-    });
-
-    questionsList.querySelectorAll("[data-edit]").forEach(btn=>{
-      btn.addEventListener("click", ()=>{
-        const idx = Number(btn.getAttribute("data-edit"));
-        editIndex = idx;
-        fillFormFromQuestion(questionBank[idx]);
-        cancelEditBtn.style.display = "inline-block";
-        saveQBtn.textContent = "💾 Zapisz zmiany";
-        adminPanel.scrollTo({ top: adminPanel.scrollHeight, behavior:"smooth" });
-      });
-    });
-
-    questionsList.querySelectorAll("[data-del]").forEach(btn=>{
-      btn.addEventListener("click", ()=>{
-        const idx = Number(btn.getAttribute("data-del"));
-        if (!confirm("Usunąć to pytanie?")) return;
-        questionBank.splice(idx, 1);
-        persistBank();
-        renderAdminList();
-      });
-    });
-  }
-
-  cancelEditBtn.addEventListener("click", cancelEdit);
-
-  saveQBtn.addEventListener("click", ()=>{
-    const q = {
-      cat: qCat.value.trim(),
-      q: newQ.value.trim(),
-      a: [a1.value.trim(), a2.value.trim(), a3.value.trim()],
-      c: Number(correctSel.value),
-      imgData: editImgData
-    };
-
-    if (!q.q || q.a.some(x=>!x)){
-      alert("Uzupełnij treść pytania i odpowiedzi A/B/C.");
+    // fallback: spróbuj migracji z poprzednich wersji (np. v2 z "shots")
+    if(parsed && (parsed.shots || parsed.fabrics)){
+      state = migrateV1ToV3(parsed);
+      saveState(true);
       return;
     }
-    if (![0,1,2].includes(q.c)) q.c = 0;
+  }catch(e){
+    console.warn("Nie można wczytać stanu, seed…", e);
+  }
+  state = stateFromSeed(SEED_DATA);
+  saveState(true);
+}
 
-    if (editIndex === null){
-      questionBank.push(q);
-    } else {
-      questionBank[editIndex] = q;
+function saveState(immediate=false){
+  state.updatedAt = now();
+  localStorage.setItem(LS_KEY, JSON.stringify(state));
+  setSaveStatus("zapisano");
+  if(immediate) return;
+}
+
+const saveDebounced = (() => {
+  let t=null;
+  return () => {
+    setSaveStatus("zapis…");
+    clearTimeout(t);
+    t = setTimeout(() => saveState(false), 200);
+  };
+})();
+
+function ensureFabric(fid){
+  if(state.fabrics[fid]) return;
+  state.fabrics[fid] = {id: fid, name: fid, group: state.groups[0] || "Kolekcja", createdAt: now()};
+}
+function ensureColorMap(fid){
+  if(!state.colors[fid]) state.colors[fid] = {};
+}
+
+// ------------------------- Bulk selection (UI) -------------------------
+
+function getSelectedColorSet(fid){
+  let set = selectedColors.get(fid);
+  if(!set){
+    set = new Set();
+    selectedColors.set(fid, set);
+  }
+  return set;
+}
+function selectedColorsCount(fid){
+  const set = selectedColors.get(fid);
+  return set ? set.size : 0;
+}
+function totalSelectedFabrics(){ return selectedFabrics.size; }
+
+function clearSelections(){
+  selectedFabrics.clear();
+  selectedColors.clear();
+}
+
+function toggleSelectFabric(fid){
+  if(selectedFabrics.has(fid)) selectedFabrics.delete(fid);
+  else selectedFabrics.add(fid);
+  render();
+}
+
+function toggleSelectColor(fid, color){
+  const set = getSelectedColorSet(fid);
+  const c = String(color);
+  if(set.has(c)) set.delete(c); else set.add(c);
+  if(set.size === 0) selectedColors.delete(fid);
+  render();
+}
+
+function selectAllColors(fid){
+  const m = state.colors[fid] || {};
+  const set = getSelectedColorSet(fid);
+  Object.keys(m).forEach(c => set.add(String(c)));
+  render();
+}
+
+function clearSelectedColors(fid){
+  selectedColors.delete(fid);
+  render();
+}
+
+function bulkDeleteSelectedColors(fid){
+  const set = selectedColors.get(fid);
+  if(!set || set.size === 0) return;
+  const f = state.fabrics[fid];
+  const ok = confirm(`Usunąć ${set.size} zaznaczonych kolorów z tkaniny "${f?.name || fid}"?`);
+  if(!ok) return;
+
+  ensureColorMap(fid);
+
+  const deleted = {};
+  const deletedMedia = {};
+  for(const c of set){
+    const key = String(c);
+    deleted[key] = state.colors[fid][key];
+    const media = (state.media && state.media[fid]) ? state.media[fid][key] : null;
+    if(media != null) deletedMedia[key] = media;
+  }
+
+  pushUndo(`usuń kolory (${set.size})`, () => {
+    ensureColorMap(fid);
+    for(const key of Object.keys(deleted)){
+      if(deleted[key] != null) state.colors[fid][key] = deleted[key];
     }
-
-    persistBank();
-    renderAdminList();
-    cancelEdit();
-  });
-
-  resetBankBtn.addEventListener("click", ()=>{
-    if (!confirm("Przywrócić bank 40 pytań?")) return;
-    questionBank = structuredClone(defaultBank40);
-    persistBank();
-    renderAdminList();
-    cancelEdit();
-    alert("Przywrócono bank pytań.");
-  });
-
-  clearRankBtn.addEventListener("click", clearRanking);
-  clearHistoryBtn.addEventListener("click", clearHistoryView);
-
-  /* =========================
-     QUIZ + COMBO
-  ========================= */
-  let quiz = [];
-  let current = 0;
-  let score = 0;
-  let bonus = 0;
-  let combo = 0;
-  let timer = null;
-  let timeLeft = 20;
-  let player = "";
-  let userAnswers = [];
-  let lockAnswers = false;
-  let trainingMode = false;
-
-  function setPillDanger(isDanger){
-    if (isDanger) timePill.classList.add("pillDanger");
-    else timePill.classList.remove("pillDanger");
-  }
-  function disableAllAnswers(){
-    document.querySelectorAll(".ansBtn").forEach(b=>b.disabled = true);
-  }
-  function flashOk(){ glowOk.style.opacity = "1"; setTimeout(()=>glowOk.style.opacity = "0", 180); }
-  function flashBad(){ glowBad.style.opacity = "1"; setTimeout(()=>glowBad.style.opacity = "0", 180); }
-  function shake(el){
-    el.classList.add("shake");
-    setTimeout(()=>el.classList.remove("shake"), 220);
-  }
-  function showComboPop(text){
-    comboPop.textContent = `🔥 ${text}!`;
-    comboPop.classList.remove("show");
-    void comboPop.offsetWidth;
-    comboPop.classList.add("show");
-  }
-  function updateComboUI(){
-    comboValueEl.textContent = `x${combo}`;
-    bonusValueEl.textContent = `+${bonus}`;
-  }
-  function maybeAwardComboBonus(){
-    if (combo === 3) { bonus += 1; showComboPop("+1 BONUS"); sfxCombo(); }
-    if (combo === 5) { bonus += 2; showComboPop("+2 BONUS"); sfxCombo(); }
-    if (combo === 8) { bonus += 3; showComboPop("+3 BONUS"); sfxCombo(); }
-    updateComboUI();
-  }
-
-  function startQuiz(){
-    getCtx();
-
-    const name = playerName.value.trim();
-    if(!name){ alert("Podaj imię!"); return; }
-
-    if (!Array.isArray(questionBank) || questionBank.length < 40){
-      alert("Bank pytań ma mniej niż 40. Przywróć bank w panelu admina.");
-      return;
-    }
-
-    player = name;
-    current = 0;
-    score = 0;
-    bonus = 0;
-    combo = 0;
-    userAnswers = [];
-    lockAnswers = false;
-
-    quiz = shuffle(structuredClone(questionBank)).slice(0, 40);
-
-    startScreen.style.display = "none";
-    resultScreen.style.display = "none";
-    quizScreen.style.display = "block";
-
-    sfxSirenShort();
-    updateComboUI();
-    showQuestion(true);
-  }
-
-  function endQuizEarly(){
-    if (!confirm("Zakończyć quiz teraz?")) return;
-    clearInterval(timer);
-    finishQuiz();
-  }
-
-  function showQuestion(first=false){
-    const q = quiz[current];
-
-    if (!first){
-      questionArea.classList.remove("fadeIn");
-      questionArea.classList.add("fadeOut");
-    }
-
-    const applyUpdate = ()=>{
-      questionArea.classList.remove("fadeOut");
-      questionArea.classList.add("fadeIn");
-
-      qIndexEl.innerText = String(current + 1);
-      qTotalEl.innerText = String(quiz.length);
-      categoryEl.innerText = q.cat || "—";
-      questionEl.innerText = q.q;
-
-      const pct = Math.round((current/quiz.length)*100);
-      progressEl.style.width = `${pct}%`;
-
-      // image (miniaturka do pytania)
-      const imgSrc = getQuestionImage(q);
-      if (imgSrc){
-        qImgWrap.style.display = "flex";
-        qImg.src = imgSrc;
-      } else {
-        qImgWrap.style.display = "none";
-        qImg.src = "";
+    if(Object.keys(deletedMedia).length){
+      state.media = state.media || {};
+      state.media[fid] = state.media[fid] || {};
+      for(const key of Object.keys(deletedMedia)){
+        state.media[fid][key] = deletedMedia[key];
       }
-
-      // answers
-      answersEl.innerHTML = "";
-      q.a.forEach((ans, i)=>{
-        const btn = document.createElement("button");
-        btn.className = "ansBtn";
-        btn.innerHTML = `<b>${String.fromCharCode(65+i)}.</b> ${escapeHtml(ans)}`;
-        btn.addEventListener("click", ()=> selectAnswer(i, btn));
-        answersEl.appendChild(btn);
-      });
-
-      // timer
-      lockAnswers = false;
-      timeLeft = 20;
-      timerEl.innerText = String(timeLeft);
-      setPillDanger(false);
-      clearInterval(timer);
-      timer = setInterval(()=>{
-        timeLeft--;
-        timerEl.innerText = String(timeLeft);
-        if (timeLeft <= 5) setPillDanger(true);
-        if (timeLeft <= 0){
-          clearInterval(timer);
-          onTimeUp();
-        }
-      }, 1000);
-    };
-
-    if (first) applyUpdate();
-    else setTimeout(applyUpdate, 150);
-  }
-
-  function onTimeUp(){
-    if (lockAnswers) return;
-    lockAnswers = true;
-    disableAllAnswers();
-    setPillDanger(false);
-
-    // timeout => answer -1
-    userAnswers.push(-1);
-
-    // reveal correct
-    const correct = quiz[current].c;
-    const buttons = document.querySelectorAll(".ansBtn");
-    if (buttons[correct]) buttons[correct].classList.add("ansCorrect");
-    flashBad();
-    combo = 0;
-    updateComboUI();
-
-    if (trainingMode){
-      const correctText = quiz[current].a[correct];
-      const explainText = quiz[current].exp || quiz[current].explain || "";
-      showTrainingPanel(i === correct, correctText, explainText);
-    } else {
-      setTimeout(()=>{
-        current++;
-        if (current < quiz.length) showQuestion();
-        else finishQuiz();
-      }, 520);
     }
+  });
+
+  for(const c of set){
+    const key = String(c);
+    delete state.colors[fid][key];
+    if(state.media && state.media[fid]){
+      delete state.media[fid][key];
+      if(Object.keys(state.media[fid]).length === 0) delete state.media[fid];
+    }
+  }
+  selectedColors.delete(fid);
+  saveDebounced();
+  render();
 }
 
-  
-  function showTrainingPanel(isCorrect, correctText, explainText){
-    if (!trainingPanel) return;
-    trainingTitle.textContent = isCorrect ? "✅ Dobrze!" : "❌ Błędnie";
-    const cls = isCorrect ? "ok" : "bad";
-    const ex = explainText ? `<div class="muted" style="margin-top:6px;">${escapeHtml(explainText)}</div>` : "";
-    trainingBody.innerHTML = `<div class="${cls}">Poprawna odpowiedź: <strong>${escapeHtml(correctText)}</strong></div>${ex}`;
-    trainingPanel.style.display = "flex";
+function bulkSetSelectedColors(fid, status){
+  const set = selectedColors.get(fid);
+  if(!set || set.size === 0) return;
+  ensureFabric(fid);
+  ensureColorMap(fid);
+
+  // zapamiętaj poprzednie statusy (tylko zaznaczone)
+  const prev = {};
+  for(const c of set){
+    prev[String(c)] = state.colors[fid][String(c)];
   }
 
-  function hideTrainingPanelAndAdvance(){
-    if (trainingPanel) trainingPanel.style.display = "none";
-    current++;
-    if (current < quiz.length) showQuestion();
-    else finishQuiz();
+  pushUndo(`status kolorów (${status})`, () => {
+    ensureColorMap(fid);
+    for(const c of Object.keys(prev)){
+      if(prev[c] == null) delete state.colors[fid][c];
+      else state.colors[fid][c] = prev[c];
+    }
+  });
+
+  for(const c of set){
+    state.colors[fid][String(c)] = status;
   }
-
-function selectAnswer(i, clickedBtn){
-    if (lockAnswers) return;
-    lockAnswers = true;
-    clearInterval(timer);
-    disableAllAnswers();
-
-    const correct = quiz[current].c;
-
-    if (i === correct){
-      clickedBtn.classList.add("ansCorrect");
-      sfxCorrect();
-      flashOk();
-      score++;
-
-      combo++;
-      maybeAwardComboBonus();
-      if (combo >= 2) showComboPop(`COMBO x${combo}`);
-    } else {
-      clickedBtn.classList.add("ansWrong");
-      const buttons = document.querySelectorAll(".ansBtn");
-      if (buttons[correct]) buttons[correct].classList.add("ansCorrect");
-      sfxWrong();
-      flashBad();
-      shake(questionArea);
-
-      combo = 0;
-      updateComboUI();
-    }
-
-    userAnswers.push(i);
-
-    if (trainingMode){
-      const correctText = quiz[current].a[correct];
-      const explainText = quiz[current].exp || quiz[current].explain || "";
-      showTrainingPanel(i === correct, correctText, explainText);
-    } else {
-      setTimeout(()=>{
-        current++;
-        if (current < quiz.length) showQuestion();
-        else finishQuiz();
-      }, 520);
-    }
+  saveDebounced();
+  render();
 }
 
-  /* =========================
-     Rank system + end anim
-  ========================= */
-  function getRank(percent){
-    if (percent === 100) return { name:"MISTRZ OSP", emoji:"🔥", bg:"rgba(246,196,83,.18)" };
-    if (percent >= 90) return { name:"ELITA", emoji:"🏆", bg:"rgba(57,217,138,.16)" };
-    if (percent >= 75) return { name:"STRAŻAK", emoji:"🚒", bg:"rgba(255,255,255,.10)" };
-    if (percent >= 60) return { name:"RATOWNIK", emoji:"🧯", bg:"rgba(191,200,214,.16)" };
-    return { name:"REKRUT", emoji:"🚧", bg:"rgba(255,77,77,.14)" };
+function bulkSetSelectedFabrics(status){
+  if(selectedFabrics.size === 0) return;
+
+  // zapamiętaj poprzednie statusy wszystkich kolorów w zaznaczonych tkaninach
+  const prev = {};
+  for(const fid of selectedFabrics){
+    const m = state.colors[fid] || {};
+    prev[fid] = {...m};
   }
 
-  function animateCountUp(correct, bonusPts, totalPts, percent){
-    const start = performance.now();
-    const dur = 900;
-
-    function step(now){
-      const t = clamp((now - start)/dur, 0, 1);
-      const ease = 1 - Math.pow(1 - t, 3);
-
-      countCorrect.textContent = String(Math.round(correct * ease));
-      countBonus.textContent = String(Math.round(bonusPts * ease));
-      countTotal.textContent = String(Math.round(totalPts * ease));
-      countPercent.textContent = `${Math.round(percent * ease)}%`;
-
-      if (t < 1) requestAnimationFrame(step);
+  pushUndo(`status tkanin (${status})`, () => {
+    for(const fid of Object.keys(prev)){
+      state.colors[fid] = {...prev[fid]};
     }
-    requestAnimationFrame(step);
-  }
+  });
 
-  // Confetti (simple)
-  let confetti = [];
-  let confettiRun = false;
-
-  function resizeConfetti(){
-    const rect = confettiCanvas.getBoundingClientRect();
-    confettiCanvas.width = Math.floor(rect.width * devicePixelRatio);
-    confettiCanvas.height = Math.floor(rect.height * devicePixelRatio);
-  }
-
-  function startConfetti(){
-    resizeConfetti();
-    window.addEventListener("resize", resizeConfetti);
-
-    confetti = Array.from({length: 110}).map(()=>({
-      x: Math.random(),
-      y: Math.random() * -0.2,
-      r: 2 + Math.random()*4,
-      vx: (Math.random()-0.5) * 0.18,
-      vy: 0.18 + Math.random()*0.28,
-      a: Math.random()*Math.PI*2
-    }));
-
-    confettiRun = true;
-    requestAnimationFrame(drawConfetti);
-  }
-
-  function stopConfetti(){
-    confettiRun = false;
-    confCtx.clearRect(0,0,confettiCanvas.width, confettiCanvas.height);
-    window.removeEventListener("resize", resizeConfetti);
-  }
-
-  function drawConfetti(){
-    if (!confettiRun) return;
-    const w = confettiCanvas.width;
-    const h = confettiCanvas.height;
-
-    confCtx.clearRect(0,0,w,h);
-
-    confetti.forEach(p=>{
-      p.x += p.vx;
-      p.y += p.vy;
-      p.a += 0.1;
-
-      if (p.y > 1.1) { p.y = -0.1; p.x = Math.random(); }
-      if (p.x < -0.1) p.x = 1.1;
-      if (p.x > 1.1) p.x = -0.1;
-
-      const px = p.x * w;
-      const py = p.y * h;
-
-      confCtx.save();
-      confCtx.translate(px, py);
-      confCtx.rotate(p.a);
-      confCtx.globalAlpha = 0.9;
-      confCtx.fillStyle = `hsl(${Math.floor(Math.random()*360)}, 90%, 60%)`;
-      confCtx.fillRect(-p.r, -p.r, p.r*2, p.r*2);
-      confCtx.restore();
-    });
-
-    requestAnimationFrame(drawConfetti);
-  }
-
-  function finishQuiz(){
-    clearInterval(timer);
-    setPillDanger(false);
-
-    const totalPoints = score + bonus;
-    const percent = Math.round((score/quiz.length)*100);
-
-    quizScreen.style.display = "none";
-    resultScreen.style.display = "block";
-
-    const r = getRank(percent);
-    rankBadge.textContent = `${r.emoji} ${r.name}`;
-    rankBadge.style.background = r.bg;
-
-    finalResult.innerText =
-      `${player} – poprawne: ${score}/${quiz.length} (${percent}%) | bonus: +${bonus} | suma pkt: ${totalPoints}`;
-
-    renderReview(quiz, userAnswers, review);
-    saveRankingAttempt({ name: player, score: percent, points: totalPoints, quiz, answers: userAnswers });
-
-    renderRanking(rankingList);
-    renderRanking(rankingList2);
-    renderPodium(podiumStart);
-    renderPodium(podiumResult);
-
-    startConfetti();
-    animateCountUp(score, bonus, totalPoints, percent);
-
-    // scroll to top of result screen (button is already on top, but just in case)
-    resultScreen.scrollIntoView({ behavior:"smooth", block:"start" });
-  }
-
-  function nextPlayer(){
-    resultScreen.style.display = "none";
-    quizScreen.style.display = "none";
-    startScreen.style.display = "block";
-    playerName.value = "";
-    review.innerHTML = "";
-    stopConfetti();
-    clearInterval(timer);
-  }
-
-  /* =========================
-     Review render
-  ========================= */
-  function renderReview(quizArr, answersArr, targetEl){
-    let html = "";
-    quizArr.forEach((q, idx)=>{
-      const user = answersArr[idx];
-      const correct = q.c;
-
-      const userText = (user === -1)
-        ? "Brak (czas minął)"
-        : `${String.fromCharCode(65+user)}. ${q.a[user]}`;
-
-      const userOk = (user === correct);
-
-      html += `
-        <div class="qBox">
-          <b>${idx+1}. ${escapeHtml(q.q)}</b>
-          <div class="muted">Kategoria: ${escapeHtml(q.cat || "—")}</div>
-          <div class="muted">Obrazek: ${escapeHtml(q.img || "—")}</div>
-          <div style="margin-top:8px;">
-            Twoja odpowiedź:
-            <span class="${userOk ? "ok" : "bad"}">${escapeHtml(userText)}</span><br>
-            Poprawna:
-            <span class="ok">${String.fromCharCode(65+correct)}. ${escapeHtml(q.a[correct])}</span>
-          </div>
-        </div>
-      `;
-    });
-    targetEl.innerHTML = html;
-  }
-
-  /* =========================
-     Ranking localStorage
-  ========================= */
-  function loadRanking(){
-    const r = safeParse(localStorage.getItem(RANK_KEY));
-    return Array.isArray(r) ? r : [];
-  }
-
-  function saveRankingAttempt(attempt){
-    const ranking = loadRanking();
-    ranking.push(attempt);
-    ranking.sort((a,b)=>{
-      const s = (b.score ?? 0) - (a.score ?? 0);
-      if (s !== 0) return s;
-      return (b.points ?? 0) - (a.points ?? 0);
-    });
-    localStorage.setItem(RANK_KEY, JSON.stringify(ranking.slice(0,200)));
-  }
-
-  function renderRanking(targetEl){
-    const ranking = loadRanking();
-    targetEl.innerHTML = "";
-
-    if (!ranking.length){
-      targetEl.innerHTML = `<div class="muted">Brak wyników — zagraj jako pierwszy 🙂</div>`;
-      return;
+  for(const fid of selectedFabrics){
+    ensureColorMap(fid);
+    for(const c of Object.keys(state.colors[fid])){
+      state.colors[fid][c] = status;
     }
+  }
+  saveDebounced();
+  render();
+}
 
-    ranking.slice(0, 30).forEach((r, idx)=>{
-      const div = document.createElement("div");
-      div.className = "rankItem";
+function bulkDeleteSelectedFabrics(){
+  if(selectedFabrics.size === 0) return;
+  const names = Array.from(selectedFabrics).slice(0,6).map(fid => state.fabrics[fid]?.name || fid);
+  const more = selectedFabrics.size > 6 ? `… (+${selectedFabrics.size-6})` : "";
+  const ok = confirm(`Usunąć ${selectedFabrics.size} zaznaczonych tkanin?
+${names.join(", ")} ${more}
 
-      const place = idx+1;
-      const badgeCls = place === 1 ? "gold" : place === 2 ? "silver" : place === 3 ? "bronze" : "";
-      const badge = place <= 3
-        ? `<span class="badge ${badgeCls}">#${place}</span>`
-        : `<span class="badge">#${place}</span>`;
+Uwaga: usunie też wszystkie ich kolory.`);
+  if(!ok) return;
 
-      div.innerHTML = `
-        <div class="rankLeft">
-          ${badge}
-          <div>
-            <div style="font-weight:1000;">${escapeHtml(r.name)}</div>
-            <div class="muted">${r.score}% ${typeof r.points === "number" ? `| pkt: ${r.points}` : ""}</div>
-          </div>
-        </div>
-        <div class="muted">📋</div>
-      `;
-      div.addEventListener("click", ()=> showHistory(idx));
-      targetEl.appendChild(div);
+  // backup danych do undo
+  const backup = [];
+  for(const fid of Array.from(selectedFabrics)){
+    backup.push({
+      fid,
+      fabric: state.fabrics[fid] ? {...state.fabrics[fid]} : null,
+      colors: state.colors[fid] ? {...state.colors[fid]} : {},
+      media: (state.media && state.media[fid]) ? {...state.media[fid]} : {}
     });
   }
 
-  function renderPodium(targetEl){
-    const ranking = loadRanking();
-    const slots = [
-      {label:"🥇", cls:"gold"},
-      {label:"🥈", cls:"silver"},
-      {label:"🥉", cls:"bronze"},
-    ];
-    targetEl.innerHTML = "";
-
-    slots.forEach((s, idx)=>{
-      const data = ranking[idx];
-      const name = data ? data.name : "—";
-      const score = data ? `${data.score}%` : "—";
-      const pts = data && typeof data.points === "number" ? ` | pkt: ${data.points}` : "";
-
-      const div = document.createElement("div");
-      div.className = "podium";
-      div.innerHTML = `
-        <div class="podiumPlace">
-          <span class="badge ${s.cls}">${s.label}</span>
-          <span class="podiumScore">${score}${pts}</span>
-        </div>
-        <div class="podiumName">${escapeHtml(name)}</div>
-        <div class="muted">TOP ${idx+1}</div>
-      `;
-      targetEl.appendChild(div);
-    });
-  }
-
-  function showHistory(index){
-    const ranking = loadRanking();
-    const data = ranking[index];
-    if (!data || !data.quiz || !data.answers){
-      alert("Brak danych do podglądu.");
-      return;
+  pushUndo(`usuń tkaniny (${selectedFabrics.size})`, () => {
+    for(const b of backup){
+      if(!b.fabric) continue;
+      state.fabrics[b.fid] = {...b.fabric};
+      state.colors[b.fid] = {...b.colors};
+      if(Object.keys(b.media).length){
+        state.media = state.media || {};
+        state.media[b.fid] = {...b.media};
+      }
     }
+  });
 
-    const header = `
-      <div class="divider"></div>
-      <div class="rankHeader">
-        📋 Podgląd odpowiedzi:
-        <span style="color:var(--text)">${escapeHtml(data.name)}</span>
-        <span class="muted">(${data.score}% | pkt: ${data.points ?? 0})</span>
+  for(const fid of Array.from(selectedFabrics)){
+    delete state.fabrics[fid];
+    delete state.colors[fid];
+    if(state.media) delete state.media[fid];
+    selectedColors.delete(fid);
+  }
+  selectedFabrics.clear();
+  saveDebounced();
+  render();
+}
+
+function updateBulkToolbar(){
+  const btnToggle = $("#btnBulkToggle");
+  const btnClear = $("#btnBulkClear");
+  const btnDelete = $("#btnBulkDeleteFabrics");
+
+  const bulkSetLabel = $("#bulkSetLabel");
+  const btnSetTodo = $("#btnBulkSetTodo");
+  const btnSetFix  = $("#btnBulkSetFix");
+  const btnSetDone = $("#btnBulkSetDone");
+
+  if(btnToggle){
+    btnToggle.textContent = bulkMode ? "Tryb masowy: ON" : "Masowe";
+  }
+  if(btnClear){
+    btnClear.classList.toggle("hidden", !bulkMode);
+  }
+  if(btnDelete){
+    btnDelete.classList.toggle("hidden", !bulkMode);
+    btnDelete.textContent = `Usuń tkaniny (${selectedFabrics.size})`;
+    btnDelete.disabled = selectedFabrics.size === 0;
+  }
+
+  const showBulkSet = bulkMode;
+  if(bulkSetLabel) bulkSetLabel.classList.toggle("hidden", !showBulkSet);
+  for(const b of [btnSetTodo, btnSetFix, btnSetDone]){
+    if(!b) continue;
+    b.classList.toggle("hidden", !showBulkSet);
+    b.disabled = selectedFabrics.size === 0;
+  }
+
+  document.body.classList.toggle("bulkMode", bulkMode);
+
+  updateUndoButton();
+}
+
+// ------------------------- Rendering -------------------------
+
+function getFilters(){
+  const q = ($("#q")?.value || "").trim().toLowerCase();
+  const group = $("#groupFilter")?.value || "";
+  const status = $("#statusFilter")?.value || "";
+  return {q, group, status};
+}
+
+function fabricCounts(fid){
+  const m = state.colors[fid] || {};
+  const colors = Object.keys(m);
+  let done=0, fix=0, todo=0;
+  for(const c of colors){
+    const s = m[c];
+    if(s === STATUS.DONE) done++;
+    else if(s === STATUS.FIX) fix++;
+    else todo++;
+  }
+  return {total: colors.length, done, fix, todo};
+}
+
+function groupCounts(ids){
+  let total=0, done=0, fix=0, todo=0;
+  for(const fid of ids){
+    const c = fabricCounts(fid);
+    total += c.total;
+    done += c.done;
+    fix  += c.fix;
+    todo += c.todo;
+  }
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  return {total, done, fix, todo, pct};
+}
+
+function matchesQuery(fid, q){
+  if(!q) return true;
+  const f = state.fabrics[fid];
+  const name = (f?.name || "").toLowerCase();
+  if(name.includes(q)) return true;
+
+  // jeśli wpisano numer/fragment numeru, spróbuj dopasować kolor
+  if(/\d/.test(q)){
+    const m = state.colors[fid] || {};
+    for(const c of Object.keys(m)){
+      if(String(c).includes(q)) return true;
+    }
+  }
+  return false;
+}
+
+function filterFabricIds(){
+  const {q, group, status} = getFilters();
+  const ids = Object.keys(state.fabrics);
+  const out = [];
+  for(const fid of ids){
+    const f = state.fabrics[fid];
+    if(group && f.group !== group) continue;
+    if(!matchesQuery(fid, q)) continue;
+
+    if(status){
+      const m = state.colors[fid] || {};
+      const has = Object.keys(m).some(c => m[c] === status);
+      if(!has) continue;
+    }
+    out.push(fid);
+  }
+  // sort by group order (state.groups), then name
+  out.sort((a,b) => {
+    const ga = (state.fabrics[a]?.group||"");
+    const gb = (state.fabrics[b]?.group||"");
+    if(ga !== gb){
+      const ra = groupRank(ga);
+      const rb = groupRank(gb);
+      if(ra !== rb) return ra - rb;
+      return ga.localeCompare(gb, "pl");
+    }
+    return (state.fabrics[a]?.name||"").localeCompare(state.fabrics[b]?.name||"", "pl");
+  });
+  return out;
+}
+
+function renderFilters(){
+  const groupSel = $("#groupFilter");
+  const newFabricGroup = $("#newFabricGroup");
+  const groups = uniq([...(state.groups||[])]).filter(Boolean);
+  if(groups.length === 0) groups.push("Kolekcja");
+
+  // if current group value not present, add
+  const current = groupSel?.value || "";
+  if(groupSel){
+    groupSel.innerHTML = "";
+    const optAll = document.createElement("option");
+    optAll.value = "";
+    optAll.textContent = "Wszystkie";
+    groupSel.appendChild(optAll);
+    for(const g of groups){
+      const opt = document.createElement("option");
+      opt.value = g;
+      opt.textContent = g;
+      groupSel.appendChild(opt);
+    }
+    if(groups.includes(current) || current==="") groupSel.value = current;
+  }
+
+  if(newFabricGroup){
+    newFabricGroup.innerHTML = "";
+    for(const g of groups){
+      const opt = document.createElement("option");
+      opt.value = g;
+      opt.textContent = g;
+      newFabricGroup.appendChild(opt);
+    }
+  }
+}
+
+function renderGroupsEditor(){
+  const wrap = $("#groupsList");
+  if(!wrap) return;
+  wrap.innerHTML = "";
+  const groups = uniq([...(state.groups||[])]).filter(Boolean);
+  if(groups.length === 0) groups.push("Kolekcja");
+
+  for(const g of groups){
+    const row = document.createElement("div");
+    row.className = "groupRow";
+    row.innerHTML = `
+      <input value="${escapeHtml(g)}" data-g="${escapeAttr(g)}" />
+      <button class="btn mini ghost" type="button" data-action="setFirstGroup" data-g="${escapeAttr(g)}" title="Ustaw jako pierwszą kolekcję">${g===groups[0] ? "⭐ Pierwsza" : "Na górę"}</button>
+      <button class="btn mini" type="button" data-action="saveGroup" data-g="${escapeAttr(g)}">Zapisz</button>
+      <button class="btn mini ghost" type="button" data-action="deleteGroup" data-g="${escapeAttr(g)}">Usuń</button>
+    `;
+    wrap.appendChild(row);
+  }
+}
+
+function escapeHtml(s){
+  return String(s||"")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#39;");
+}
+function escapeAttr(s){ return escapeHtml(s); }
+
+function render(){
+  renderFilters();
+  renderGroupsEditor();
+  updateBulkToolbar();
+
+  const list = $("#fabricList");
+  if(!list) return;
+  list.innerHTML = "";
+
+  const visibleIds = filterFabricIds();
+  const groups = uniq(visibleIds.map(fid => state.fabrics[fid]?.group || "Kolekcja"))
+    .sort((a,b) => {
+      const ra = groupRank(a);
+      const rb = groupRank(b);
+      if(ra !== rb) return ra - rb;
+      return a.localeCompare(b, "pl");
+    });
+
+  lastGroups = groups;
+
+  // domyślny wybór (pierwsza widoczna tkanina), żeby prawy panel nie był pusty
+  if(selectedFid && !visibleIds.includes(selectedFid)) selectedFid = null;
+  if(!selectedFid && visibleIds.length) selectedFid = visibleIds[0];
+
+  for(const g of groups){
+    const block = document.createElement("div");
+    block.className = "groupBlock";
+
+    const ids = visibleIds.filter(fid => (state.fabrics[fid]?.group || "Kolekcja") === g);
+    const totalColors = ids.reduce((acc, fid) => acc + fabricCounts(fid).total, 0);
+    const gc = groupCounts(ids);
+    const isCollapsed = collapsedGroups.has(g);
+    const chevron = isCollapsed ? "▸" : "▾";
+
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "groupHeadBtn";
+    head.dataset.action = "toggleGroup";
+    head.dataset.group = g;
+    head.innerHTML = `
+      <div class="groupLeft">
+        <div class="groupChevron">${chevron}</div>
+        <div>
+          <div class="groupTitle">${escapeHtml(g)}</div>
+          <div class="groupMeta">${ids.length} tkanin · ${totalColors} kolorów</div>
+        </div>
+      </div>
+      <div class="groupRight">
+        <div class="groupDone"><b>${gc.done}</b>/<b>${gc.total}</b> ✓</div>
+        <div class="progress group" aria-hidden="true"><div style="width:${gc.pct}%;"></div></div>
       </div>
     `;
+    block.appendChild(head);
 
-    const target = (startScreen.style.display !== "none") ? historyView : historyView2;
-    target.innerHTML = header + `<div id="__history_review"></div>`;
-    renderReview(data.quiz, data.answers, $("__history_review"));
-  }
+    if(!isCollapsed){
+      for(const fid of ids){
+        const f = state.fabrics[fid];
+        const counts = fabricCounts(fid);
+        const pct = counts.total ? Math.round((counts.done / counts.total)*100) : 0;
 
-  function clearRanking(){
-    if (!confirm("Na pewno zresetować ranking?")) return;
-    localStorage.removeItem(RANK_KEY);
-    renderRanking(rankingList);
-    renderRanking(rankingList2);
-    renderPodium(podiumStart);
-    renderPodium(podiumResult);
-    clearHistoryView();
-  }
+        const fabricEl = document.createElement("div");
+        fabricEl.className = "fabric";
 
-  function clearHistoryView(){
-    historyView.innerHTML = "";
-    historyView2.innerHTML = "";
-  }
+        const isActive = selectedFid === fid;
 
-  /* =========================
-     Bind buttons
-  ========================= */
-  // Training mode toggle (offline)
-  try{
-    trainingMode = localStorage.getItem("osp_trainingMode") === "1";
-  }catch(e){}
-  if (trainingToggle){
-    trainingToggle.checked = trainingMode;
-    trainingToggle.addEventListener("change", ()=>{
-      trainingMode = !!trainingToggle.checked;
-      try{ localStorage.setItem("osp_trainingMode", trainingMode ? "1" : "0"); }catch(e){}
-    });
-  }
-
-  startBtn.addEventListener("click", startQuiz);
-  playerName.addEventListener("keydown", (e)=>{ if (e.key === "Enter") startQuiz(); });
-  endBtn.addEventListener("click", endQuizEarly);
-  nextPlayerBtn.addEventListener("click", nextPlayer);
-  if (trainingNextBtn) trainingNextBtn.addEventListener("click", ()=>{ hideTrainingPanelAndAdvance(); });
-  document.addEventListener("keydown", (e)=>{
-    if (trainingMode && trainingPanel && trainingPanel.style.display !== "none" && (e.key === "Enter" || e.key === " ")){ 
-      e.preventDefault();
-      hideTrainingPanelAndAdvance();
-    }
-  });
-
-
-  /* =========================
-     DEV panel (dynamic)
-     - open: 3 clicks on logo within 1s
-     - pass: pako14 (no hints in UI)
-     - changes visuals: subtitle, logo, bg, bg blur, music
-  ========================= */
-  function getDev(){
-    try{ return JSON.parse(localStorage.getItem(DEV_KEY)) || {}; }
-    catch{ return {}; }
-  }
-  function saveDev(obj){
-    localStorage.setItem(DEV_KEY, JSON.stringify(obj));
-  }
-
-  function applyDev(){
-    const s = getDev();
-
-    // subtitle
-    if (s.subtitle){
-      const sub = document.querySelector(".subtitle");
-      if (sub) sub.textContent = s.subtitle;
-    }
-
-    // logo
-    if (s.logo){
-      const logo = document.querySelector(".logo");
-      if (logo) logo.src = s.logo;
-    }
-
-    // bg image
-    if (s.bg){
-      document.body.style.background = `url("${s.bg}") no-repeat center center fixed`;
-      document.body.style.backgroundSize = "cover";
-    }
-
-    // bg blur
-    const blur = Number(s.bgBlur ?? 12);
-    document.documentElement.style.setProperty("--bg-blur", `${clamp(blur,0,20)}px`);
-
-    // music (robust reload)
-    if (s.music){
-      try{
-        music.pause();
-        // remove all <source>
-        while (music.firstChild) music.removeChild(music.firstChild);
-        music.src = s.music;
-        music.load();
-      }catch{}
-    }
-  }
-
-  function createDevPanel(){
-    // Use existing panel from HTML if present; otherwise create it dynamically.
-    let panel = document.getElementById("devPanel");
-    if (!panel){
-      panel = document.createElement("div");
-      panel.id = "devPanel";
-      panel.innerHTML = `
-        <div class="adminTitle">Panel dewelopera</div>
-        <div id="devCloseEdge">✖</div>
-
-        <div id="devLoginSection" class="adminBox">
-          <input class="input" type="password" id="devPassword" placeholder="Hasło" />
-          <button class="btn btnPrimary" id="devLoginBtn">Zaloguj</button>
-          <div class="muted" style="margin-top:8px;">Enter zatwierdza logowanie.</div>
-        </div>
-
-        <div id="devContent" style="display:none;">
-          <div class="adminBox">
-            <div class="muted" style="margin-bottom:8px;">Zmiany zapisują się lokalnie (offline) na tym urządzeniu.</div>
-
-            <input class="input" id="devSubtitle" placeholder="Zmiana nazwy jednostki (np. Ochotnicza Straż Pożarna w ...)" />
-
-            <div class="muted" style="margin-top:10px;">Zmiana logo jednostki (plik)</div>
-            <input class="input" type="file" id="devLogo" accept="image/*" />
-
-            <div class="muted" style="margin-top:10px;">Zmiana tła strony (plik)</div>
-            <input class="input" type="file" id="devBg" accept="image/*" />
-
-            <div class="muted" style="margin-top:10px;">Rozmycie tła</div>
-            <input class="input" type="range" id="devBlur" min="0" max="20" step="1" value="12" />
-
-            <div style="display:flex; gap:10px; margin-top:12px;">
-              <button class="btn btnPrimary" id="devSaveBtn">💾 Zapisz</button>
-              <button class="btn btnGhost" id="devResetBtn">🔄 Reset</button>
+        fabricEl.innerHTML = `
+          <button class="fabricHeader ${isActive ? "active" : ""}" type="button" data-action="selectFabric" data-fid="${escapeAttr(fid)}">
+            ${bulkMode ? `<input class="bulkChk" type="checkbox" data-action="toggleSelectFabric" data-fid="${escapeAttr(fid)}" aria-label="Zaznacz tkaninę" ${selectedFabrics.has(fid) ? "checked" : ""} />` : ""}
+            <div class="chev">›</div>
+            <div class="fabricName">${escapeHtml(f.name)}</div>
+            <div class="fabricCounts">
+              <div><b>${counts.done}</b>/<b>${counts.total}</b> zrobione</div>
+              <div class="progress" aria-hidden="true"><div style="width:${pct}%;"></div></div>
             </div>
-          </div>
-        </div>
-      `;
-      document.body.appendChild(panel);
-    }
+          </button>
+        `;
 
-    // Close edge: support both "inside panel" edge and legacy "floating" edge.
-    let edge = document.getElementById("devCloseEdge");
-    if (!edge){
-      edge = document.createElement("div");
-      edge.id = "devCloseEdge";
-      edge.textContent = "✖";
-      document.body.appendChild(edge);
-    }
-
-    const open = () => {
-      panel.classList.add("active");
-      edge.style.display = "block";
-
-      // Autofocus hasła po otwarciu (żeby od razu można pisać)
-      setTimeout(()=>{
-        try{
-          const loginVisible = devLoginSection && devLoginSection.style.display !== "none";
-          if (loginVisible){
-            devPassword.focus();
-            devPassword.select?.();
-          }
-        }catch{}
-      }, 0);
-    };
-    const close = () => {
-      panel.classList.remove("active");
-      edge.style.display = "none";
-    };
-
-    edge.addEventListener("click", close);
-
-    const devGear = document.getElementById("devGear");
-    if (devGear){
-      devGear.addEventListener("click", ()=>{
-        if (panel.classList.contains("active")) close();
-        else open();
-      });
-    }
-
-
-    // Wire up login + controls (guard if elements are missing)
-    const devPassword = document.getElementById("devPassword");
-    const devLoginBtn = document.getElementById("devLoginBtn");
-    const devLoginSection = document.getElementById("devLoginSection");
-    const devContent = document.getElementById("devContent");
-
-    function loginDev(){
-      getCtx();
-      if (devPassword && devPassword.value === "pako14"){
-        if (devLoginSection) devLoginSection.style.display = "none";
-        if (devContent) devContent.style.display = "block";
-
-        // preload current settings
-        const s = getDev();
-        const sub = document.getElementById("devSubtitle");
-        const blur = document.getElementById("devBlur");
-        if (sub) sub.value = s.subtitle ?? "";
-        if (blur) blur.value = String(Number(s.bgBlur ?? 12));
-      } else {
-        alert("Nieprawidłowe hasło.");
+        block.appendChild(fabricEl);
       }
     }
 
-    if (devLoginBtn) devLoginBtn.addEventListener("click", loginDev);
-    if (devPassword) devPassword.addEventListener("keydown", (e)=>{ if (e.key === "Enter") loginDev(); });
-
-    // Save + reset
-    const devSaveBtn = document.getElementById("devSaveBtn");
-    if (devSaveBtn){
-      devSaveBtn.addEventListener("click", ()=>{
-        const s = getDev();
-        const sub = document.getElementById("devSubtitle");
-        const blur = document.getElementById("devBlur");
-        if (sub) s.subtitle = sub.value.trim() || "";
-        if (blur) s.bgBlur = Number(blur.value);
-
-        saveDev(s);
-        applyDev();
-        close();
-      });
-    }
-
-    const devResetBtn = document.getElementById("devResetBtn");
-    if (devResetBtn){
-      devResetBtn.addEventListener("click", ()=>{
-        if (!confirm("Zresetować ustawienia panelu dewelopera?")) return;
-        localStorage.removeItem(DEV_KEY);
-        location.reload();
-      });
-    }
-
-    // file inputs => dataURL (offline)
-    function fileToDataUrl(input, cb){
-      const file = input && input.files && input.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => cb(String(reader.result || ""));
-      reader.readAsDataURL(file);
-    }
-
-    const devLogo = document.getElementById("devLogo");
-    if (devLogo){
-      devLogo.addEventListener("change", (e)=>{
-        fileToDataUrl(e.target, (dataUrl)=>{
-          const s = getDev();
-          s.logo = dataUrl;
-          saveDev(s);
-          applyDev();
-        });
-      });
-    }
-
-    const devBg = document.getElementById("devBg");
-    if (devBg){
-      devBg.addEventListener("change", (e)=>{
-        fileToDataUrl(e.target, (dataUrl)=>{
-          const s = getDev();
-          s.bg = dataUrl;
-          saveDev(s);
-          applyDev();
-        });
-      });
-    }
-
-    // opcjonalnie: ikona 🛠 obok panelu admina
-    const devGearBtn = document.getElementById("devGear");
-    if (devGearBtn){
-      devGearBtn.addEventListener("click", open);
-    }
-
-    // 3-click open on logo (or title as fallback)
-    let clicks = 0;
-    let clickTimer = null;
-    const logo = document.getElementById("unitLogo") || document.querySelector(".logo") || document.querySelector(".topBrand");
-    if (logo){
-      logo.addEventListener("click", ()=>{
-        clicks++;
-        clearTimeout(clickTimer);
-        clickTimer = setTimeout(()=>{ clicks = 0; }, 900);
-
-        if (clicks >= 3){
-          clicks = 0;
-          open();
-        }
-      });
-    }
+    list.appendChild(block);
   }
 
-  createDevPanel();
-  applyDev();
+  if(groups.length === 0){
+    const empty = document.createElement("div");
+    empty.className = "muted small";
+    empty.style.padding = "14px";
+    empty.textContent = "Brak wyników dla podanych filtrów.";
+    list.appendChild(empty);
+  }
 
-  /* =========================
-     INIT
-  ========================= */
-  renderRanking(rankingList);
-  renderRanking(rankingList2);
-  renderPodium(podiumStart);
-  renderPodium(podiumResult);
+  // jeśli zaznaczona tkanina została usunięta
+  if(selectedFid && !state.fabrics[selectedFid]) selectedFid = null;
+  renderDetails();
+}
 
-})();
+function renderDetails(){
+  const pane = $("#detailPane");
+  if(!pane) return;
+
+  if(!selectedFid){
+    pane.innerHTML = `
+      <div class="detailEmpty">
+        <div class="muted">Wybierz tkaninę z listy po lewej, aby zobaczyć kolory po prawej.</div>
+        <div class="muted small" style="margin-top:6px;">Tip: możesz użyć wyszukiwarki i filtrów u góry.</div>
+      </div>
+    `;
+    return;
+  }
+
+  const f = state.fabrics[selectedFid];
+  if(!f){
+    selectedFid = null;
+    renderDetails();
+    return;
+  }
+
+  const counts = fabricCounts(selectedFid);
+  const pct = counts.total ? Math.round((counts.done / counts.total)*100) : 0;
+  const {status: statusFilter} = getFilters();
+
+  pane.innerHTML = `
+    <div class="detailTop">
+      <div>
+        <div class="detailTitle">${escapeHtml(f.name)}</div>
+        <div class="detailSub">${escapeHtml(f.group || "Kolekcja")}</div>
+      </div>
+      <div class="detailCounts">
+        <div><b>${counts.done}</b>/<b>${counts.total}</b> zrobione</div>
+        <div class="progress" aria-hidden="true"><div style="width:${pct}%;"></div></div>
+      </div>
+    </div>
+
+    <div class="colorsTools">
+      <div class="field">
+        <label>Dodaj kolory</label>
+        <input class="addColorsInput" data-fid="${escapeAttr(selectedFid)}" placeholder="np. 1-10, 15, 22" />
+      </div>
+      <button class="btn mini" type="button" data-action="addColors" data-fid="${escapeAttr(selectedFid)}">Dodaj</button>
+      <div class="hint">${statusFilter ? `Filtr: <b>${escapeHtml(statusFilter)}</b>` : "Status ustawiasz per kolor."}</div>
+      ${bulkMode ? `
+        <div class="bulkColorsBar">
+          <button class="btn mini ghost" type="button" data-action="selectAllColors" data-fid="${escapeAttr(selectedFid)}">Zaznacz wszystkie kolory</button>
+          <button class="btn mini ghost" type="button" data-action="clearSelectedColors" data-fid="${escapeAttr(selectedFid)}">Wyczyść zazn.</button>
+          <button class="btn mini danger" type="button" data-action="bulkDeleteSelectedColors" data-fid="${escapeAttr(selectedFid)}">Usuń kolory (${selectedColorsCount(selectedFid)})</button>
+          <span class="muted small">Ustaw:</span>
+          <button class="statusIcon miniStatus todo" type="button" ${selectedColorsCount(selectedFid)===0 ? "disabled" : ""} data-action="bulkSetSelectedColors" data-fid="${escapeAttr(selectedFid)}" data-status="${escapeAttr(STATUS.TODO)}" title="Ustaw status: do nagrania">✕</button>
+          <button class="statusIcon miniStatus fix" type="button" ${selectedColorsCount(selectedFid)===0 ? "disabled" : ""} data-action="bulkSetSelectedColors" data-fid="${escapeAttr(selectedFid)}" data-status="${escapeAttr(STATUS.FIX)}" title="Ustaw status: do poprawy">?</button>
+          <button class="statusIcon miniStatus done" type="button" ${selectedColorsCount(selectedFid)===0 ? "disabled" : ""} data-action="bulkSetSelectedColors" data-fid="${escapeAttr(selectedFid)}" data-status="${escapeAttr(STATUS.DONE)}" title="Ustaw status: zrobione">✓</button>
+        </div>
+      ` : ``}
+    </div>
+
+    <div class="colorsTable" data-fid="${escapeAttr(selectedFid)}">
+      ${renderColorsTable(selectedFid)}
+    </div>
+
+    <div class="detailFoot">
+      <button class="btn mini danger" type="button" data-action="deleteFabric" data-fid="${escapeAttr(selectedFid)}">Usuń tkaninę</button>
+    </div>
+  `;
+}
+
+function renderColorsTable(fid){
+  const m = state.colors[fid] || {};
+  const colorsAll = Object.keys(m).sort(compareColor);
+  const {status: statusFilter} = getFilters();
+  const colors = statusFilter ? colorsAll.filter(c => m[c] === statusFilter) : colorsAll;
+
+  const selSet = selectedColors.get(fid) || new Set();
+
+  if(colors.length === 0){
+    return `<div class="colorRow"><div class="muted small">Brak kolorów do wyświetlenia.</div></div>`;
+  }
+
+  const rows = colors.map(c => {
+    const s = m[c] || STATUS.TODO;
+
+    const btn = (icon, st, cls) => `
+      <button class="statusIcon st ${cls} ${s===st?'active':''}" type="button"
+              title="${escapeAttr(st)}"
+              aria-label="${escapeAttr(st)}"
+              data-action="setStatus"
+              data-fid="${escapeAttr(fid)}"
+              data-color="${escapeAttr(c)}"
+              data-status="${escapeAttr(st)}">${icon}</button>
+    `;
+
+    return `
+      <div class="colorRow">
+        ${bulkMode ? `<input class="bulkChk" type="checkbox" data-action="toggleSelectColor" data-fid="${escapeAttr(fid)}" data-color="${escapeAttr(c)}" aria-label="Zaznacz kolor #${escapeAttr(c)}" ${selSet.has(String(c)) ? "checked" : ""} />` : ""}
+        <div class="colorNo">#${escapeHtml(c)}</div>
+        <div class="statusBtns">
+          ${btn("✕", STATUS.TODO, "todo")}
+          ${btn("?", STATUS.FIX, "fix")}
+          ${btn("✓", STATUS.DONE, "done")}
+        </div>
+        <button class="smallBtn" type="button"
+                data-action="removeColor"
+                data-fid="${escapeAttr(fid)}"
+                data-color="${escapeAttr(c)}">Usuń</button>
+      </div>
+    `;
+  }).join("");
+
+  return rows;
+}
+
+// ------------------------- Actions -------------------------
+
+
+function setStatus(fid, color, status){
+  ensureFabric(fid);
+  ensureColorMap(fid);
+  const key = String(color);
+  const prev = state.colors[fid][key];
+  if(prev === status) return; 
+
+  pushUndo(`status #${key}`, () => {
+    ensureColorMap(fid);
+    if(prev == null) delete state.colors[fid][key];
+    else state.colors[fid][key] = prev;
+  });
+
+  state.colors[fid][key] = status;
+  saveDebounced();
+  render();
+}
+
+function addColors(fid, raw){
+  const colors = parseColorsInput(raw);
+  if(colors.length === 0) return;
+
+  ensureFabric(fid);
+  ensureColorMap(fid);
+
+  const addedColors = [];
+  for(const c of colors){
+    if(state.colors[fid][c]) continue;
+    state.colors[fid][c] = STATUS.TODO;
+    addedColors.push(String(c));
+  }
+
+  if(addedColors.length){
+    pushUndo(`dodaj kolory (${addedColors.length})`, () => {
+      ensureColorMap(fid);
+      for(const c of addedColors){
+        delete state.colors[fid][c];
+      // (opcjonalnie) usuń powiązane media, jeśli istnieją
+      if(state.media && state.media[fid]){
+        delete state.media[fid][String(c)];
+        if(Object.keys(state.media[fid]).length === 0) delete state.media[fid];
+      }
+      }
+    });
+    saveDebounced();
+    render();
+  }
+}
+
+function removeColor(fid, color){
+  ensureColorMap(fid);
+  const key = String(color);
+  const prevStatus = state.colors[fid][key];
+  const prevMedia = (state.media && state.media[fid]) ? state.media[fid][key] : null;
+
+  pushUndo(`usuń kolor #${key}`, () => {
+    ensureColorMap(fid);
+    if(prevStatus != null) state.colors[fid][key] = prevStatus;
+    if(prevMedia != null){
+      state.media = state.media || {};
+      state.media[fid] = state.media[fid] || {};
+      state.media[fid][key] = prevMedia;
+    }
+  });
+
+  delete state.colors[fid][key];
+  // usuń ewentualne powiązane media (pozostałość po starszych wersjach)
+  if(state.media && state.media[fid]){
+    delete state.media[fid][key];
+    if(Object.keys(state.media[fid]).length === 0) delete state.media[fid];
+  }
+
+  const set = selectedColors.get(fid);
+  if(set){
+    set.delete(key);
+    if(set.size === 0) selectedColors.delete(fid);
+  }
+  saveDebounced();
+  render();
+}
+
+function deleteFabric(fid){
+  const f = state.fabrics[fid];
+  if(!f) return;
+  const colorsMap = state.colors[fid] ? {...state.colors[fid]} : {};
+  const mediaMap = (state.media && state.media[fid]) ? {...state.media[fid]} : {};
+  const count = Object.keys(colorsMap).length;
+
+  const ok = confirm(`Usunąć tkaninę "${f.name}"?
+Usunie też ${count} kolorów.`);
+  if(!ok) return;
+
+  pushUndo(`usuń tkaninę ${f.name}`, () => {
+    state.fabrics[fid] = {...f};
+    state.colors[fid] = {...colorsMap};
+    if(Object.keys(mediaMap).length){
+      state.media = state.media || {};
+      state.media[fid] = {...mediaMap};
+    }
+  });
+
+  delete state.fabrics[fid];
+  delete state.colors[fid];
+  if(state.media) delete state.media[fid];
+  selectedFabrics.delete(fid);
+  selectedColors.delete(fid);
+  saveDebounced();
+  render();
+}
+
+function addFabric(name, group){
+  const n = String(name||"").trim();
+  if(!n) return alert("Podaj nazwę tkaniny.");
+  const g = group || state.groups[0] || "Kolekcja";
+  if(!state.groups.includes(g)) state.groups.push(g);
+
+  let id = slugify(n);
+  // ensure unique
+  let i=2;
+  while(state.fabrics[id]){ id = `${slugify(n)}-${i++}`; }
+
+  pushUndo(`dodaj tkaninę ${n}`, () => {
+    delete state.fabrics[id];
+    delete state.colors[id];
+    if(state.media) delete state.media[id];
+    selectedFabrics.delete(id);
+    selectedColors.delete(id);
+  });
+
+  state.fabrics[id] = {id, name: n, group: g, createdAt: now()};
+  if(!state.colors[id]) state.colors[id] = {};
+  saveDebounced();
+  render();
+}
+
+function setGroupFirst(name){
+  const g = String(name||"").trim();
+  if(!g) return;
+  if(!state.groups.includes(g)) return;
+
+  const prev = [...state.groups];
+  pushUndo("kolejność kolekcji", () => { state.groups = [...prev]; });
+
+  state.groups = [g, ...state.groups.filter(x => x !== g)];
+  saveDebounced();
+  render();
+}
+
+function addGroup(name){
+  const n = String(name||"").trim();
+  if(!n) return alert("Podaj nazwę kolekcji.");
+  if(state.groups.includes(n)) return alert("Taka kolekcja już istnieje.");
+
+  const prevGroups = [...state.groups];
+  const prevFabricGroups = {};
+  for(const fid of Object.keys(state.fabrics)) prevFabricGroups[fid] = state.fabrics[fid].group;
+
+  pushUndo(`dodaj kolekcję ${n}`, () => {
+    state.groups = [...prevGroups];
+    for(const fid of Object.keys(prevFabricGroups)){
+      if(state.fabrics[fid]) state.fabrics[fid].group = prevFabricGroups[fid];
+    }
+  });
+
+  state.groups.push(n);
+  saveDebounced();
+  render();
+}
+
+function renameGroup(oldName, newName){
+  const nn = String(newName||"").trim();
+  if(!nn) return alert("Nazwa nie może być pusta.");
+  if(oldName === nn) return;
+  if(state.groups.includes(nn)) return alert("Taka kolekcja już istnieje.");
+
+  const prevGroups = [...state.groups];
+  const prevFabricGroups = {};
+  for(const fid of Object.keys(state.fabrics)) prevFabricGroups[fid] = state.fabrics[fid].group;
+
+  pushUndo(`zmień nazwę kolekcji`, () => {
+    state.groups = [...prevGroups];
+    for(const fid of Object.keys(prevFabricGroups)){
+      if(state.fabrics[fid]) state.fabrics[fid].group = prevFabricGroups[fid];
+    }
+  });
+
+  state.groups = state.groups.map(g => g===oldName ? nn : g);
+  // update fabrics
+  for(const fid of Object.keys(state.fabrics)){
+    if(state.fabrics[fid].group === oldName) state.fabrics[fid].group = nn;
+  }
+  saveDebounced();
+  render();
+}
+
+function deleteGroup(name){
+  const groups = state.groups.filter(g => g !== name);
+  if(groups.length === 0) return alert("Nie możesz usunąć jedynej kolekcji.");
+
+  const fallback = groups[0];
+  const affected = Object.values(state.fabrics).filter(f => f.group === name).length;
+
+  const ok = confirm(`Usunąć kolekcję "${name}"?
+Tkaniny z tej kolekcji zostaną przeniesione do: "${fallback}".
+Liczba tkanin: ${affected}`);
+  if(!ok) return;
+
+  const prevGroups = [...state.groups];
+  const prevFabricGroups = {};
+  for(const fid of Object.keys(state.fabrics)) prevFabricGroups[fid] = state.fabrics[fid].group;
+
+  pushUndo(`usuń kolekcję ${name}`, () => {
+    state.groups = [...prevGroups];
+    for(const fid of Object.keys(prevFabricGroups)){
+      if(state.fabrics[fid]) state.fabrics[fid].group = prevFabricGroups[fid];
+    }
+  });
+
+  for(const fid of Object.keys(state.fabrics)){
+    if(state.fabrics[fid].group === name) state.fabrics[fid].group = fallback;
+  }
+  state.groups = groups;
+  saveDebounced();
+  render();
+}
+
+function exportJSON(){
+  const payload = JSON.stringify(state, null, 2);
+  const stamp = new Date().toISOString().slice(0,10);
+  downloadFile(`Tracker_Backup_${stamp}.json`, payload, "application/json");
+}
+
+function exportCSV(){
+  const rows = [];
+  rows.push(["Kolekcja","Tkanina","ID","Kolor","Status"].map(csvCell).join(";"));
+  for(const fid of Object.keys(state.fabrics)){
+    const f = state.fabrics[fid];
+    const m = state.colors[fid] || {};
+    const colors = Object.keys(m).sort(compareColor);
+    for(const c of colors){
+      rows.push([f.group, f.name, fid, c, m[c]].map(csvCell).join(";"));
+    }
+    if(colors.length === 0){
+      rows.push([f.group, f.name, fid, "", ""].map(csvCell).join(";"));
+    }
+  }
+  const stamp = new Date().toISOString().slice(0,10);
+  downloadFile(`Tracker_${stamp}.csv`, rows.join("\n"), "text/csv;charset=utf-8");
+}
+function csvCell(v){
+  const s = String(v ?? "");
+  // Excel PL lubi średniki; i tak zabezpieczamy cudzysłowami
+  return `"${s.replaceAll('"','""')}"`;
+}
+
+async function importJSON(file){
+  if(!file) return alert("Wybierz plik JSON.");
+  const text = await file.text();
+  let parsed = null;
+  try{ parsed = JSON.parse(text); }catch(e){ return alert("To nie jest poprawny JSON."); }
+
+  // akceptujemy v3, lub starsze (migrujemy)
+  let next = null;
+  if(parsed?.version === 3 && parsed.fabrics && parsed.colors) next = parsed;
+  else if(parsed && (parsed.shots || parsed.fabrics)) next = migrateV1ToV3(parsed);
+  else return alert("Nie rozpoznaję formatu tego backupu.");
+
+  const ok = confirm("Import zastąpi Twoje aktualne dane w tej przeglądarce. Kontynuować?");
+  if(!ok) return;
+
+  state = next;
+  if(!state.media) state.media = {};
+  saveState(true);
+  collapsedGroups = new Set();
+  render();
+}
+
+function resetToSeed(){
+  const ok = confirm("Reset do danych startowych nadpisze bieżące dane. Kontynuować?");
+  if(!ok) return;
+  state = stateFromSeed(SEED_DATA);
+  saveState(true);
+  collapsedGroups = new Set();
+  render();
+}
+
+// ------------------------- Event wiring -------------------------
+
+function wire(){
+  $("#q")?.addEventListener("input", () => render());
+  $("#groupFilter")?.addEventListener("change", () => render());
+  $("#statusFilter")?.addEventListener("change", () => render());
+
+  $("#btnCollapseAll")?.addEventListener("click", () => { collapsedGroups = new Set(lastGroups); render(); });
+  $("#btnExpandAll")?.addEventListener("click", () => { collapsedGroups.clear(); render(); });
+
+  // Bulk mode
+  $("#btnBulkToggle")?.addEventListener("click", () => {
+    bulkMode = !bulkMode;
+    if(!bulkMode) clearSelections();
+    render();
+  });
+  $("#btnBulkClear")?.addEventListener("click", () => { clearSelections(); render(); });
+  $("#btnBulkDeleteFabrics")?.addEventListener("click", () => bulkDeleteSelectedFabrics());
+
+  // Undo
+  $("#btnUndo")?.addEventListener("click", () => undo());
+  window.addEventListener("keydown", (e) => {
+    const isMac = navigator.platform.toUpperCase().includes("MAC");
+    const mod = isMac ? e.metaKey : e.ctrlKey;
+    if(!mod || e.key.toLowerCase() !== "z") return;
+    // nie przeszkadzaj w pisaniu w polach tekstowych
+    const a = document.activeElement;
+    if(a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) return;
+    e.preventDefault();
+    undo();
+  });
+
+  // Masowa zmiana statusu dla zaznaczonych tkanin
+  $("#btnBulkSetTodo")?.addEventListener("click", () => bulkSetSelectedFabrics(STATUS.TODO));
+  $("#btnBulkSetFix")?.addEventListener("click", () => bulkSetSelectedFabrics(STATUS.FIX));
+  $("#btnBulkSetDone")?.addEventListener("click", () => bulkSetSelectedFabrics(STATUS.DONE));
+
+  // Actions (delegacja)
+  // Uwaga: mamy 2 panele (lista po lewej + szczegóły po prawej), więc delegujemy kliknięcia w obu.
+
+  const handleActionClick = (e) => {
+    const target = e.target;
+    if(!(target instanceof HTMLElement)) return;
+    const el = target.closest("[data-action]");
+    if(!(el instanceof HTMLElement)) return;
+
+    const action = el.dataset.action;
+    if(!action) return;
+
+    if(action === "toggleSelectFabric"){
+      const fid = el.dataset.fid;
+      if(!fid) return;
+      toggleSelectFabric(fid);
+      return;
+    }
+
+    if(action === "toggleSelectColor"){
+      const fid = el.dataset.fid;
+      const color = el.dataset.color;
+      if(!fid || !color) return;
+      toggleSelectColor(fid, color);
+      return;
+    }
+
+    if(action === "selectAllColors"){
+      const fid = el.dataset.fid;
+      if(!fid) return;
+      selectAllColors(fid);
+      return;
+    }
+
+    if(action === "clearSelectedColors"){
+      const fid = el.dataset.fid;
+      if(!fid) return;
+      clearSelectedColors(fid);
+      return;
+    }
+
+    if(action === "bulkDeleteSelectedColors"){
+      const fid = el.dataset.fid;
+      if(!fid) return;
+      bulkDeleteSelectedColors(fid);
+      return;
+    }
+
+    if(action === "bulkSetSelectedColors"){
+      const fid = el.dataset.fid;
+      const status = el.dataset.status;
+      if(!fid || !status) return;
+      bulkSetSelectedColors(fid, status);
+      return;
+    }
+
+    if(action === "toggleGroup"){
+      const g = el.dataset.group;
+      if(!g) return;
+      if(collapsedGroups.has(g)) collapsedGroups.delete(g); else collapsedGroups.add(g);
+      render();
+      return;
+    }
+
+    if(action === "selectFabric"){
+      const fid = el.dataset.fid;
+      if(!fid) return;
+      selectedFid = fid;
+      render();
+      return;
+    }
+
+    if(action === "setStatus"){
+      const fid = el.dataset.fid;
+      const color = el.dataset.color;
+      const status = el.dataset.status;
+      if(fid && color && status) setStatus(fid, color, status);
+      return;
+    }
+
+    if(action === "removeColor"){
+      const fid = el.dataset.fid;
+      const color = el.dataset.color;
+      if(!fid || !color) return;
+      const ok = confirm(`Usunąć kolor #${color} z tkaniny?`);
+      if(ok) removeColor(fid, color);
+      return;
+    }
+
+    if(action === "addColors"){
+      const fid = el.dataset.fid;
+      if(!fid) return;
+      const input = $(`.addColorsInput[data-fid="${CSS.escape(fid)}"]`);
+      const raw = input?.value || "";
+      addColors(fid, raw);
+      if(input) input.value = "";
+      return;
+    }
+
+    if(action === "deleteFabric"){
+      const fid = el.dataset.fid;
+      if(!fid) return;
+      deleteFabric(fid);
+      return;
+    }
+  };
+
+  $("#fabricList")?.addEventListener("click", handleActionClick);
+  $("#detailPane")?.addEventListener("click", handleActionClick);
+
+  // Enter w polu dodawania kolorów
+  document.addEventListener("keydown", (e) => {
+    const t = e.target;
+    if(!(t instanceof HTMLElement)) return;
+    if(t.classList.contains("addColorsInput") && e.key === "Enter"){
+      e.preventDefault();
+      const fid = t.dataset.fid;
+      if(!fid) return;
+      addColors(fid, t.value);
+      t.value = "";
+    }
+  });
+
+  // Backup modal
+  const backupModal = $("#backupModal");
+  $("#btnBackup")?.addEventListener("click", () => backupModal?.showModal());
+  $("#btnExportJson")?.addEventListener("click", exportJSON);
+  $("#btnExportCsv")?.addEventListener("click", exportCSV);
+  $("#btnImportJson")?.addEventListener("click", async () => {
+    const file = $("#importFile")?.files?.[0];
+    await importJSON(file);
+  });
+  $("#btnResetSeed")?.addEventListener("click", resetToSeed);
+
+  // Settings modal
+  const settingsModal = $("#settingsModal");
+  $("#btnSettings")?.addEventListener("click", () => settingsModal?.showModal());
+
+  $("#btnAddFabric")?.addEventListener("click", () => {
+    addFabric($("#newFabricName")?.value, $("#newFabricGroup")?.value);
+    const n = $("#newFabricName"); if(n) n.value="";
+  });
+
+  $("#btnAddGroup")?.addEventListener("click", () => {
+    addGroup($("#newGroupName")?.value);
+    const ng = $("#newGroupName"); if(ng) ng.value="";
+  });
+
+  $("#groupsList")?.addEventListener("click", (e) => {
+    const t = e.target;
+    if(!(t instanceof HTMLElement)) return;
+    const action = t.dataset.action;
+    const g = t.dataset.g;
+    if(!action || !g) return;
+
+    if(action === "setFirstGroup"){
+      setGroupFirst(g);
+      return;
+    }
+
+    if(action === "saveGroup"){
+      const input = $(`#groupsList input[data-g="${CSS.escape(g)}"]`);
+      const newName = input?.value;
+      renameGroup(g, newName);
+      return;
+    }
+    if(action === "deleteGroup"){
+      deleteGroup(g);
+      return;
+    }
+  });
+
+  // PWA install
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    const btn = $("#btnInstall");
+    if(btn) btn.classList.remove("hidden");
+  });
+  $("#btnInstall")?.addEventListener("click", async () => {
+    if(!deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    $("#btnInstall")?.classList.add("hidden");
+  });
+
+  // Service worker
+  if("serviceWorker" in navigator){
+    navigator.serviceWorker.register("sw.js").catch(()=>{});
+  }
+}
+
+// ------------------------- Boot -------------------------
+
+loadState();
+wire();
+render();
+setSaveStatus("gotowe");
